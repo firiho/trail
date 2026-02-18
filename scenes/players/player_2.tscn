@@ -1,0 +1,30 @@
+[gd_scene format=3 uid="uid://digxfd72ubesy"]
+
+[ext_resource type="Script" uid="uid://dylmp3uts3rjl" path="res://scenes/players/player_character.gd" id="1"]
+
+[sub_resource type="SpriteFrames" id="SpriteFrames_yo2jb"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_body"]
+radius = 15.0
+height = 40.0
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_hitbox"]
+size = Vector2(25.5, 38)
+
+[node name="Player2" type="CharacterBody2D" unique_id=989901538]
+script = ExtResource("1")
+player_folder = "player_2"
+
+[node name="AnimatedSprite2D" type="AnimatedSprite2D" parent="." unique_id=424643267]
+scale = Vector2(0.15, 0.15)
+sprite_frames = SubResource("SpriteFrames_yo2jb")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1799251229]
+shape = SubResource("CapsuleShape2D_body")
+
+[node name="Hitbox" type="Area2D" parent="." unique_id=1181718939]
+monitoring = false
+monitorable = false
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Hitbox" unique_id=1693460151]
+shape = SubResource("RectangleShape2D_hitbox")

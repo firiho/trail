@@ -1,0 +1,27 @@
+[gd_scene format=3 uid="uid://cwuct7q5sbnsa"]
+
+[ext_resource type="Script" uid="uid://b5l646v73x8h" path="res://scenes/opps/opp_character.gd" id="1"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_body"]
+radius = 15.0
+height = 40.0
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_hitbox"]
+size = Vector2(37, 49)
+
+[node name="Opp3" type="CharacterBody2D" unique_id=186645958]
+script = ExtResource("1")
+opp_folder = "opp_3"
+
+[node name="AnimatedSprite2D" type="AnimatedSprite2D" parent="." unique_id=1797175568]
+scale = Vector2(0.25, 0.25)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1075220950]
+shape = SubResource("CapsuleShape2D_body")
+
+[node name="Hitbox" type="Area2D" parent="." unique_id=1525526328]
+monitoring = false
+monitorable = false
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Hitbox" unique_id=526097626]
+shape = SubResource("RectangleShape2D_hitbox")
