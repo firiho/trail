@@ -1,5 +1,7 @@
 extends CharacterBody2D
 
+static var _SPRITE_BUILD_CACHE := {}
+
 @export var opp_folder: String = "opp_1"
 @export var group_id: int = 0
 
@@ -8,10 +10,18 @@ extends CharacterBody2D
 const SPEED = 250.0
 const ATTACK_RANGE = 55.0
 const DETECT_RANGE = 400.0
+const PIXELS_PER_METER = 40.0
 
 @export_group("Offsets")
 @export var sprite_offset: Vector2 = Vector2.ZERO
 @export var hitbox_offset_x: float = 30.0
+@export_group("Aggro")
+@export var proximity_aggro_enabled: bool = true
+@export var proximity_aggro_range_meters: float = 5.0
+@export var proximity_aggro_linger_seconds: float = 1.0
+@export_group("Attack Telegraph")
+@export var attack_tell_enabled: bool = true
+@export var attack_tell_duration_seconds: float = 0.35
 
 # State
 enum State { IDLE, CHASE, ATTACK, HURT, DYING, JOIN_GROUP }
@@ -26,12 +36,21 @@ var health = 60
 
 var _current_anim: String = ""
 var _loaded_anims: Array[String] = []
+var _proximity_aggro_timer: float = 0.0
+var _attack_tell_progress: float = 0.0
+var _attack_tell_visible: bool = false
+var _attack_tell_tween: Tween = null
+var _attack_tell_particles: CPUParticles2D = null
+var _attack_tell_label: Label = null
+var _attack_tell_label_tween: Tween = null
 
 func _ready():
 	add_to_group("enemy")
 	add_to_group("opp_group_" + str(group_id))
 	# _setup_collision()
 	_build_sprite()
+	_setup_attack_tell_particles()
+	_setup_attack_tell_label()
 	
 	if not _hitbox.body_entered.is_connected(_on_hitbox_body_entered):
 		_hitbox.body_entered.connect(_on_hitbox_body_entered)
@@ -41,22 +60,36 @@ func _ready():
 func _build_sprite():
 	var base = "res://assets/opps/" + opp_folder + "/"
 	var anims = ["idle", "walking", "attacking", "dying", "hurt", "taunt"]
-	
-	var sf = SpriteFrames.new()
-	if sf.has_animation("default"): sf.remove_animation("default")
-	
-	for anim in anims:
-		var dir = base + anim + "/"
-		var frames = _load_frames(dir)
-		if frames.size() > 0:
-			sf.add_animation(anim)
-			sf.set_animation_loop(anim, true)
-			sf.set_animation_speed(anim, 15.0)
-			for t in frames:
-				sf.add_frame(anim, t)
-			_loaded_anims.append(anim)
-			print("Opp ", opp_folder, " loaded ", anim, ": ", frames.size(), " frames")
-			
+	_loaded_anims.clear()
+
+	var sf: SpriteFrames = null
+	if _SPRITE_BUILD_CACHE.has(opp_folder):
+		var cached = _SPRITE_BUILD_CACHE[opp_folder]
+		sf = (cached["sprite_frames"] as SpriteFrames).duplicate(true)
+		_loaded_anims = cached["loaded_anims"].duplicate()
+	else:
+		var template_sf = SpriteFrames.new()
+		if template_sf.has_animation("default"): template_sf.remove_animation("default")
+		var built_anims: Array[String] = []
+		
+		for anim in anims:
+			var dir = base + anim + "/"
+			var frames = _load_frames(dir)
+			if frames.size() > 0:
+				template_sf.add_animation(anim)
+				template_sf.set_animation_loop(anim, true)
+				template_sf.set_animation_speed(anim, 15.0)
+				for t in frames:
+					template_sf.add_frame(anim, t)
+				built_anims.append(anim)
+		
+		_SPRITE_BUILD_CACHE[opp_folder] = {
+			"sprite_frames": template_sf,
+			"loaded_anims": built_anims.duplicate()
+		}
+		sf = template_sf.duplicate(true)
+		_loaded_anims = built_anims
+				
 	# _sprite = AnimatedSprite2D.new() # Already in scene
 	_sprite.sprite_frames = sf
 	_sprite.scale = Vector2(0.25, 0.25)
@@ -79,6 +112,8 @@ func _build_sprite():
 
 func _process(delta):
 	if current_state == State.DYING: return
+	if _attack_tell_visible:
+		queue_redraw()
 
 	# Safety check for target
 	if target_body and not is_instance_valid(target_body):
@@ -110,6 +145,8 @@ func _process(delta):
 					else:
 						_sprite.flip_h = false
 						_hitbox.scale.x = 1
+				
+				_try_proximity_aggro(delta)
 		
 		State.CHASE:
 			if target_body:
@@ -128,7 +165,7 @@ func _process(delta):
 					else:
 						_sprite.flip_h = false
 						_hitbox.position.x = hitbox_offset_x
-						
+					
 					_play_anim("walking")
 			else:
 				current_state = State.IDLE
@@ -148,8 +185,9 @@ func _process(delta):
 				else:
 					_sprite.flip_h = false
 					_hitbox.position.x = hitbox_offset_x
-					
+				
 				_play_anim("walking")
+			_try_proximity_aggro(delta)
 
 		State.ATTACK:
 			if target_body:
@@ -160,11 +198,11 @@ func _process(delta):
 				else:
 					_sprite.flip_h = false
 					_hitbox.scale.x = 1
-					
+			
 			if _play_anim_once("attacking"):
 				_hitbox.monitoring = true
 			# Wait for anim finish
-			
+		
 		State.HURT:
 			# Stunned
 			pass
@@ -172,9 +210,11 @@ func _process(delta):
 func _on_anim_finished():
 	if current_state == State.ATTACK:
 		_hitbox.monitoring = false
+		_clear_attack_tell()
 		_current_anim = "" # Reset so we can attack again immediately
 		current_state = State.CHASE # check range
 	elif current_state == State.HURT:
+		_clear_attack_tell()
 		current_state = State.IDLE # recover
 		if target_body: current_state = State.CHASE
 
@@ -203,10 +243,190 @@ func on_ally_attacked(target):
 		await get_tree().create_timer(randf_range(0.5, 1.5)).timeout
 		if is_instance_valid(self) and is_instance_valid(target) and !target_body:
 			target_body = target
+			_start_attack_tell()
 			current_state = State.CHASE
+
+func _try_proximity_aggro(delta: float):
+	if !proximity_aggro_enabled:
+		_proximity_aggro_timer = 0.0
+		return
+	if target_body:
+		_proximity_aggro_timer = 0.0
+		return
+
+	var player = get_tree().get_first_node_in_group("player")
+	if !player or !is_instance_valid(player):
+		_proximity_aggro_timer = 0.0
+		return
+
+	var aggro_range_px = proximity_aggro_range_meters * PIXELS_PER_METER
+	if global_position.distance_to(player.global_position) > aggro_range_px:
+		_proximity_aggro_timer = 0.0
+		return
+
+	_proximity_aggro_timer += delta
+	if _proximity_aggro_timer >= proximity_aggro_linger_seconds:
+		target_body = player
+		_start_attack_tell()
+		current_state = State.CHASE
+		_proximity_aggro_timer = 0.0
+
+func _draw():
+	if !_attack_tell_visible:
+		return
+
+	var center = Vector2(0, -48)
+	var radius = 18.0
+	var start_angle = -PI * 0.5
+	var end_angle = start_angle + TAU * clamp(_attack_tell_progress, 0.0, 1.0)
+	var base_color = _get_attack_tell_color()
+	var pulse = 0.75 + 0.25 * sin(Time.get_ticks_msec() / 80.0)
+	var marker_color = Color(base_color.r, base_color.g, base_color.b, 1.0)
+	var outline_color = Color(0, 0, 0, 0.85)
+
+	draw_arc(center, radius + 2.0 * pulse, 0.0, TAU, 24, Color(base_color.r, base_color.g, base_color.b, 0.16), 5.0, true)
+	if _attack_tell_progress > 0.01:
+		draw_arc(center, radius, start_angle, end_angle, 24, Color(base_color.r, base_color.g, base_color.b, 0.95), 4.0, true)
+		draw_circle(center, 3.5, Color(base_color.r, base_color.g, base_color.b, 0.75))
+
+	# Guaranteed-visible exclamation marker above the ring.
+	var ex_center = center + Vector2(0, -26)
+	var ex_height = 20.0 + 3.0 * pulse
+	var ex_top = ex_center + Vector2(0, -ex_height * 0.55)
+	var ex_bottom = ex_center + Vector2(0, ex_height * 0.15)
+	draw_line(ex_top, ex_bottom, outline_color, 7.0)
+	draw_line(ex_top, ex_bottom, marker_color, 4.0)
+	draw_circle(ex_center + Vector2(0, ex_height * 0.42), 4.2, outline_color)
+	draw_circle(ex_center + Vector2(0, ex_height * 0.42), 2.7, marker_color)
+
+func _start_attack_tell():
+	if !attack_tell_enabled:
+		return
+	if _attack_tell_tween:
+		_attack_tell_tween.kill()
+	_attack_tell_visible = true
+	_attack_tell_progress = 0.0
+	_emit_attack_tell_particles()
+	_show_attack_tell_label()
+	_attack_tell_tween = create_tween()
+	_attack_tell_tween.tween_method(_set_attack_tell_progress, 0.0, 1.0, max(0.05, attack_tell_duration_seconds))
+
+func _set_attack_tell_progress(v: float):
+	_attack_tell_progress = v
+	queue_redraw()
+
+func _clear_attack_tell():
+	if _attack_tell_tween:
+		_attack_tell_tween.kill()
+		_attack_tell_tween = null
+	if _attack_tell_label_tween:
+		_attack_tell_label_tween.kill()
+		_attack_tell_label_tween = null
+	if _attack_tell_label:
+		_attack_tell_label.visible = false
+	_attack_tell_visible = false
+	_attack_tell_progress = 0.0
+	queue_redraw()
+
+func _get_attack_tell_color() -> Color:
+	match opp_folder:
+		"opp_1":
+			return Color(0.20, 0.55, 0.28, 1.0)
+		"opp_2":
+			return Color(0.62, 0.42, 0.24, 1.0)
+		"opp_3":
+			return Color(0.55, 0.28, 0.78, 1.0)
+		_:
+			return Color(1.0, 0.35, 0.35, 1.0)
+
+func _setup_attack_tell_particles():
+	if _attack_tell_particles:
+		return
+
+	_attack_tell_particles = CPUParticles2D.new()
+	_attack_tell_particles.name = "AttackTellParticles"
+	_attack_tell_particles.one_shot = true
+	_attack_tell_particles.explosiveness = 1.0
+	_attack_tell_particles.amount = 34
+	_attack_tell_particles.lifetime = max(0.18, attack_tell_duration_seconds)
+	_attack_tell_particles.emitting = false
+	_attack_tell_particles.local_coords = true
+	_attack_tell_particles.position = Vector2(0, -48)
+	_attack_tell_particles.direction = Vector2.UP
+	_attack_tell_particles.spread = 180.0
+	_attack_tell_particles.gravity = Vector2.ZERO
+	_attack_tell_particles.initial_velocity_min = 30.0
+	_attack_tell_particles.initial_velocity_max = 64.0
+	_attack_tell_particles.scale_amount_min = 0.7
+	_attack_tell_particles.scale_amount_max = 1.35
+	_attack_tell_particles.z_index = 20
+
+	var tex = GradientTexture2D.new()
+	tex.width = 16
+	tex.height = 16
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(0.9, 0.5)
+	var tex_grad = Gradient.new()
+	tex_grad.colors = [Color.WHITE, Color(1, 1, 1, 0)]
+	tex.gradient = tex_grad
+	_attack_tell_particles.texture = tex
+
+	add_child(_attack_tell_particles)
+
+func _setup_attack_tell_label():
+	if _attack_tell_label:
+		return
+	_attack_tell_label = Label.new()
+	_attack_tell_label.name = "AttackTellLabel"
+	_attack_tell_label.text = "!"
+	_attack_tell_label.visible = false
+	_attack_tell_label.position = Vector2(-10, -96)
+	_attack_tell_label.z_index = 50
+	_attack_tell_label.add_theme_font_size_override("font_size", 28)
+	_attack_tell_label.add_theme_color_override("font_color", Color.WHITE)
+	_attack_tell_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
+	_attack_tell_label.add_theme_constant_override("shadow_outline_size", 8)
+	add_child(_attack_tell_label)
+
+func _show_attack_tell_label():
+	if !_attack_tell_label:
+		return
+	if _attack_tell_label_tween:
+		_attack_tell_label_tween.kill()
+
+	var c = _get_attack_tell_color()
+	_attack_tell_label.visible = true
+	_attack_tell_label.modulate = Color(c.r, c.g, c.b, 1.0)
+	_attack_tell_label.scale = Vector2(0.7, 0.7)
+	_attack_tell_label.position = Vector2(-10, -92)
+
+	_attack_tell_label_tween = create_tween()
+	_attack_tell_label_tween.tween_property(_attack_tell_label, "scale", Vector2(1.2, 1.2), 0.08)
+	_attack_tell_label_tween.parallel().tween_property(_attack_tell_label, "position:y", -108.0, 0.08)
+	_attack_tell_label_tween.tween_property(_attack_tell_label, "scale", Vector2(1.0, 1.0), 0.10)
+	_attack_tell_label_tween.parallel().tween_property(_attack_tell_label, "position:y", -100.0, 0.10)
+
+func _emit_attack_tell_particles():
+	if !_attack_tell_particles:
+		return
+	_attack_tell_particles.lifetime = max(0.18, attack_tell_duration_seconds)
+	var c = _get_attack_tell_color()
+	var grad = Gradient.new()
+	grad.colors = [
+		Color(c.r, c.g, c.b, 1.0),
+		Color(c.r, c.g, c.b, 0.85),
+		Color(c.r, c.g, c.b, 0.0)
+	]
+	grad.offsets = [0.0, 0.75, 1.0]
+	_attack_tell_particles.color_ramp = grad
+	_attack_tell_particles.emitting = false
+	_attack_tell_particles.restart()
+	_attack_tell_particles.emitting = true
 
 func die():
 	current_state = State.DYING
+	_clear_attack_tell()
 	_play_anim_once("dying")
 	# Disable collision
 	if _collision_shape:
