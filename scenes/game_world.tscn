@@ -1,8 +1,9 @@
 [gd_scene format=3 uid="uid://biq8ui062l7ar"]
 
-[ext_resource type="Script" uid="uid://ygv2p0sh50ke" path="res://scenes/game_world.gd" id="1"]
+[ext_resource type="Script" uid="uid://by2fubek5ay70" path="res://scenes/game_world.gd" id="1"]
 
 [node name="GameWorld" type="Node2D" unique_id=446333780]
 script = ExtResource("1")
+clock_volume_db = 0.0
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=99415749]

@@ -13,6 +13,12 @@ static var _SPRITE_BUILD_CACHE := {}
 @export var trail_color_blend_speed: float = 8.0
 @export var idle_death_timeout_seconds: float = 5.0
 
+@export_group("Dash")
+@export var dash_speed: float = 1200.0
+@export var dash_duration: float = 0.15
+@export var dash_cooldown: float = 0.8
+@export var dash_invincible: bool = true
+
 @export_group("Offsets")
 @export var sprite_offset: Vector2 = Vector2.ZERO
 @export var hitbox_offset_x: float = 40.0
@@ -23,6 +29,8 @@ signal idle_timer_changed(time_left, max_time)
 signal attack_started(is_controllable_attack)
 signal damage_taken(amount, is_controllable_target)
 signal idle_clock_active_changed(active)
+signal enemy_killed
+signal dash_performed
 
 
 
@@ -42,6 +50,10 @@ const ALL_ANIMATIONS = [
 var health = 100
 var is_dead = false
 var is_attacking = false
+var _is_dashing: bool = false
+var _dash_timer: float = 0.0
+var _dash_cooldown_timer: float = 0.0
+var _dash_direction: Vector2 = Vector2.ZERO
 
 @onready var _sprite: AnimatedSprite2D = $AnimatedSprite2D
 @onready var _hitbox: Area2D = $Hitbox
@@ -235,6 +247,14 @@ func _process(delta):
 			_friendly_spawn_highlight_points.clear()
 			queue_redraw()
 	if is_dead: return
+	
+	# Dash update
+	if is_controllable:
+		_dash_cooldown_timer = max(0.0, _dash_cooldown_timer - delta)
+		if _is_dashing:
+			_update_dash(delta)
+			return
+	
 	if assist_target and !is_instance_valid(assist_target):
 		assist_target = null
 		
@@ -246,6 +266,9 @@ func _process(delta):
 		_update_idle_death_timer(delta, move_input.length() > 0.0)
 		if is_dead:
 			return
+	if is_controllable and Input.is_action_just_pressed("dash") and !_is_dashing and _dash_cooldown_timer <= 0.0 and !is_attacking:
+		_perform_dash(move_input)
+		return
 	if is_controllable and Input.is_action_just_pressed("attack") and !is_attacking:
 		attack()
 	
@@ -374,7 +397,10 @@ func _on_frame_changed():
 		# Check for overlapping bodies
 		for body in _hitbox.get_overlapping_bodies():
 			if body.is_in_group("enemy") and body.has_method("take_damage"):
+				var prev_hp = body.health
 				body.take_damage(20)
+				if prev_hp > 0 and body.health <= 0 and is_controllable:
+					emit_signal("enemy_killed")
 			# Can also hit friendly NPCs if controllable player attacks
 			if is_controllable and body.is_in_group("friendly_npc") and body != self and body.has_method("take_damage"):
 				body.take_damage(20)
@@ -404,6 +430,7 @@ func set_input_enabled(enabled: bool):
 
 func take_damage(amount):
 	if is_dead: return
+	if _is_dashing and dash_invincible: return
 	health -= amount
 	emit_signal("damage_taken", amount, is_controllable)
 	emit_signal("health_changed", health, 100) # Assuming max 100
@@ -628,6 +655,75 @@ func _play_hit_flash():
 		_hit_flash_tween.tween_property(_sprite, "modulate", Color(1.0, 0.25, 0.25, 1.0), 0.06)
 		_hit_flash_tween.tween_property(_sprite, "modulate", Color.WHITE, 0.08)
 
+func _perform_dash(input_dir: Vector2):
+	if input_dir.length() > 0.1:
+		_dash_direction = input_dir.normalized()
+	elif _sprite.flip_h:
+		_dash_direction = Vector2.LEFT
+	else:
+		_dash_direction = Vector2.RIGHT
+	
+	_is_dashing = true
+	_dash_timer = dash_duration
+	_dash_cooldown_timer = dash_cooldown
+	
+	# Disable collision so dash phases through enemies
+	if _collision_shape:
+		_collision_shape.set_deferred("disabled", true)
+	
+	if _loaded_anims.has("sliding"):
+		_play_anim("sliding")
+	elif _loaded_anims.has("jump_loop"):
+		_play_anim("jump_loop")
+	
+	if _dash_direction.x < 0:
+		_sprite.flip_h = true
+		_hitbox.position.x = -hitbox_offset_x
+	elif _dash_direction.x > 0:
+		_sprite.flip_h = false
+		_hitbox.position.x = hitbox_offset_x
+	
+	_spawn_dash_ghost()
+	emit_signal("dash_performed")
+	_set_idle_clock_audio_active(false)
+
+func _update_dash(delta: float):
+	_dash_timer -= delta
+	if _dash_timer <= 0.0:
+		_is_dashing = false
+		# Re-enable collision after dash ends
+		if _collision_shape:
+			_collision_shape.set_deferred("disabled", false)
+		return
+	
+	velocity = _dash_direction * dash_speed
+	move_and_slide()
+	
+	if global_position.distance_to(_last_trail_pos) >= trail_point_spacing_px * 0.5:
+		_last_trail_pos = global_position
+		trail_points.push_front(global_position)
+		trail_point_spawn_times.push_front(_get_time_seconds())
+		if trail_points.size() > MAX_TRAIL_POINTS:
+			trail_points.pop_back()
+		if trail_point_spawn_times.size() > MAX_TRAIL_POINTS:
+			trail_point_spawn_times.pop_back()
+
+func _spawn_dash_ghost():
+	if !_sprite:
+		return
+	var ghost = Sprite2D.new()
+	ghost.texture = _sprite.sprite_frames.get_frame_texture(_sprite.animation, _sprite.frame)
+	ghost.global_position = global_position
+	ghost.scale = _sprite.scale
+	ghost.offset = _sprite.offset
+	ghost.flip_h = _sprite.flip_h
+	ghost.modulate = Color(0.6, 0.85, 1.0, 0.6)
+	ghost.z_index = z_index - 1
+	get_parent().add_child(ghost)
+	var tween = ghost.create_tween()
+	tween.tween_property(ghost, "modulate:a", 0.0, 0.4)
+	tween.tween_callback(ghost.queue_free)
+
 func _get_move_input_vector() -> Vector2:
 	var dir = Vector2.ZERO
 	if Input.is_action_pressed("ui_right"): dir.x += 1
@@ -636,25 +732,10 @@ func _get_move_input_vector() -> Vector2:
 	if Input.is_action_pressed("ui_down"): dir.y += 1
 	return dir
 
-func _update_idle_death_timer(delta: float, is_moving_input: bool):
-	if !is_controllable or is_dead:
-		_set_idle_clock_audio_active(false)
-		return
-
-	if is_moving_input:
-		_set_idle_clock_audio_active(false)
-		if idle_death_time_left < idle_death_timeout_seconds:
-			idle_death_time_left = idle_death_timeout_seconds
-			emit_signal("idle_timer_changed", idle_death_time_left, idle_death_timeout_seconds)
-		return
-	_set_idle_clock_audio_active(true)
-
-	var prev = idle_death_time_left
-	idle_death_time_left = max(0.0, idle_death_time_left - delta)
-	if absf(prev - idle_death_time_left) > 0.01:
-		emit_signal("idle_timer_changed", idle_death_time_left, idle_death_timeout_seconds)
-	if idle_death_time_left <= 0.0:
-		die()
+func _update_idle_death_timer(_delta: float, _is_moving_input: bool):
+	# Idle death disabled — player no longer dies from standing still
+	_set_idle_clock_audio_active(false)
+	return
 
 func _set_idle_clock_audio_active(active: bool):
 	if !is_controllable:

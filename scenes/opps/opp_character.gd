@@ -7,10 +7,18 @@ static var _SPRITE_BUILD_CACHE := {}
 
 
 
-const SPEED = 250.0
+const BASE_SPEED = 250.0
 const ATTACK_RANGE = 55.0
 const DETECT_RANGE = 400.0
 const PIXELS_PER_METER = 40.0
+
+# Per-instance randomness (set in _ready)
+var _speed: float = BASE_SPEED
+var _aggro_delay: float = 0.0
+var _attack_pause: float = 0.0
+var _strafe_offset: Vector2 = Vector2.ZERO
+var _strafe_timer: float = 0.0
+var _dodge_chance: float = 0.0
 
 @export_group("Offsets")
 @export var sprite_offset: Vector2 = Vector2.ZERO
@@ -51,9 +59,28 @@ func _ready():
 	_build_sprite()
 	_setup_attack_tell_particles()
 	_setup_attack_tell_label()
+	_randomize_personality()
 	
 	if not _hitbox.body_entered.is_connected(_on_hitbox_body_entered):
 		_hitbox.body_entered.connect(_on_hitbox_body_entered)
+
+func _randomize_personality():
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+	# Speed varies ±30%
+	_speed = BASE_SPEED * rng.randf_range(0.7, 1.3)
+	# Some enemies hesitate before chasing (0-1s)
+	_aggro_delay = rng.randf_range(0.0, 1.0)
+	# Pause between attacks (0-0.8s)
+	_attack_pause = rng.randf_range(0.0, 0.8)
+	# Some enemies strafe while chasing
+	_strafe_offset = Vector2(rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0)).normalized() * rng.randf_range(0.0, 40.0)
+	# Dodge chance 0-20%
+	_dodge_chance = rng.randf_range(0.0, 0.2)
+	# Randomize aggro linger too
+	proximity_aggro_linger_seconds = rng.randf_range(0.3, 2.0)
+	# Randomize attack telegraph speed
+	attack_tell_duration_seconds = rng.randf_range(0.15, 0.5)
 
 # func _setup_collision(): ... removed
 
@@ -152,11 +179,19 @@ func _process(delta):
 			if target_body:
 				var dist = global_position.distance_to(target_body.global_position)
 				if dist <= ATTACK_RANGE:
-					velocity = Vector2.ZERO # Stop immediately
-					current_state = State.ATTACK
+					# Random pause before attacking
+					if _attack_pause > 0.0:
+						_attack_pause -= delta
+						velocity = Vector2.ZERO
+					else:
+						velocity = Vector2.ZERO
+						current_state = State.ATTACK
 				else:
 					var dir = (target_body.global_position - global_position).normalized()
-					velocity = dir * SPEED
+					# Strafe while chasing for unpredictable movement
+					_strafe_timer += delta
+					var strafe = Vector2(-dir.y, dir.x) * sin(_strafe_timer * 2.5) * _strafe_offset.length()
+					velocity = dir * _speed + strafe
 					move_and_slide()
 					
 					if dir.x < 0: 
@@ -176,7 +211,7 @@ func _process(delta):
 				current_state = State.IDLE
 			else:
 				var dir = (group_target_pos - global_position).normalized()
-				velocity = dir * SPEED
+				velocity = dir * _speed
 				move_and_slide()
 				
 				if dir.x < 0: 
@@ -212,6 +247,8 @@ func _on_anim_finished():
 		_hitbox.monitoring = false
 		_clear_attack_tell()
 		_current_anim = "" # Reset so we can attack again immediately
+		# Random post-attack pause before re-engaging
+		_attack_pause = randf_range(0.0, 0.8)
 		current_state = State.CHASE # check range
 	elif current_state == State.HURT:
 		_clear_attack_tell()
@@ -225,10 +262,14 @@ func _on_hitbox_body_entered(body):
 
 func take_damage(amount):
 	if current_state == State.DYING: return
+	# Dodge chance — sometimes sidestep instead of taking full damage
+	if randf() < _dodge_chance and current_state != State.HURT:
+		var dodge_dir = Vector2(randf_range(-1, 1), randf_range(-1, 1)).normalized()
+		velocity = dodge_dir * _speed * 2.0
+		move_and_slide()
+		amount = int(amount * 0.5) # half damage on dodge
 	health -= amount
 	current_state = State.HURT
-	_play_anim_once("hurt")
-	
 	_play_anim_once("hurt")
 	
 	# Alert group - DELAYED
