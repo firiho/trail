@@ -4,6 +4,13 @@
 
 [node name="GameWorld" type="Node2D" unique_id=446333780]
 script = ExtResource("1")
+shake_damage_intensity = 5.0
+menu_music_volume_db = -20.0
+soundtrack_volume_db = -25.0
+soundtrack_near_enemy_volume_db = -30.0
+wrong_place_volume_db = -20.0
 clock_volume_db = 0.0
+music_fade_speed = 2.0
+sfx_fade_speed = 5.0
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=99415749]

@@ -11,6 +11,7 @@ const BASE_SPEED = 250.0
 const ATTACK_RANGE = 55.0
 const DETECT_RANGE = 400.0
 const PIXELS_PER_METER = 40.0
+const MIN_CHASE_SPACING = 30.0
 
 # Per-instance randomness (set in _ready)
 var _speed: float = BASE_SPEED
@@ -30,6 +31,8 @@ var _dodge_chance: float = 0.0
 @export_group("Attack Telegraph")
 @export var attack_tell_enabled: bool = true
 @export var attack_tell_duration_seconds: float = 0.35
+@export_group("Stealth")
+@export var forced_disengage_cooldown_seconds: float = 3.2
 
 # State
 enum State { IDLE, CHASE, ATTACK, HURT, DYING, JOIN_GROUP }
@@ -51,6 +54,7 @@ var _attack_tell_tween: Tween = null
 var _attack_tell_particles: CPUParticles2D = null
 var _attack_tell_label: Label = null
 var _attack_tell_label_tween: Tween = null
+var _forced_disengage_timer: float = 0.0
 
 func _ready():
 	add_to_group("enemy")
@@ -139,6 +143,7 @@ func _build_sprite():
 
 func _process(delta):
 	if current_state == State.DYING: return
+	_forced_disengage_timer = max(0.0, _forced_disengage_timer - max(0.0, delta))
 	if _attack_tell_visible:
 		queue_redraw()
 
@@ -146,6 +151,8 @@ func _process(delta):
 	if target_body and not is_instance_valid(target_body):
 		target_body = null
 		current_state = State.IDLE
+	elif target_body and _is_target_hidden(target_body):
+		force_forget_player(target_body, 140.0)
 	
 	# AI Logic
 	match current_state:
@@ -177,17 +184,21 @@ func _process(delta):
 		
 		State.CHASE:
 			if target_body:
-				var dist = global_position.distance_to(target_body.global_position)
+				var to_target = target_body.global_position - global_position
+				var dist = to_target.length()
 				if dist <= ATTACK_RANGE:
-					# Random pause before attacking
-					if _attack_pause > 0.0:
-						_attack_pause -= delta
-						velocity = Vector2.ZERO
+					if dist < MIN_CHASE_SPACING:
+						_push_off_from_target(target_body.global_position)
 					else:
-						velocity = Vector2.ZERO
-						current_state = State.ATTACK
+						# Random pause before attacking
+						if _attack_pause > 0.0:
+							_attack_pause -= delta
+							velocity = Vector2.ZERO
+						else:
+							velocity = Vector2.ZERO
+							current_state = State.ATTACK
 				else:
-					var dir = (target_body.global_position - global_position).normalized()
+					var dir = to_target.normalized()
 					# Strafe while chasing for unpredictable movement
 					_strafe_timer += delta
 					var strafe = Vector2(-dir.y, dir.x) * sin(_strafe_timer * 2.5) * _strafe_offset.length()
@@ -242,6 +253,25 @@ func _process(delta):
 			# Stunned
 			pass
 
+func _push_off_from_target(target_pos: Vector2):
+	var away = global_position - target_pos
+	if away.length_squared() <= 0.0001:
+		away = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0))
+	if away.length_squared() <= 0.0001:
+		away = Vector2.RIGHT
+	away = away.normalized()
+
+	velocity = away * _speed * 0.6
+	move_and_slide()
+
+	if away.x < 0:
+		_sprite.flip_h = true
+		_hitbox.position.x = -hitbox_offset_x
+	else:
+		_sprite.flip_h = false
+		_hitbox.position.x = hitbox_offset_x
+	_play_anim("walking")
+
 func _on_anim_finished():
 	if current_state == State.ATTACK:
 		_hitbox.monitoring = false
@@ -279,10 +309,14 @@ func take_damage(amount):
 		die()
 
 func on_ally_attacked(target):
+	if _forced_disengage_timer > 0.0:
+		return
+	if target and _is_target_hidden(target):
+		return
 	if target and !target_body:
 		# Delayed reaction
 		await get_tree().create_timer(randf_range(0.5, 1.5)).timeout
-		if is_instance_valid(self) and is_instance_valid(target) and !target_body:
+		if is_instance_valid(self) and is_instance_valid(target) and !target_body and _forced_disengage_timer <= 0.0 and !_is_target_hidden(target):
 			target_body = target
 			_start_attack_tell()
 			current_state = State.CHASE
@@ -294,9 +328,15 @@ func _try_proximity_aggro(delta: float):
 	if target_body:
 		_proximity_aggro_timer = 0.0
 		return
+	if _forced_disengage_timer > 0.0:
+		_proximity_aggro_timer = 0.0
+		return
 
 	var player = get_tree().get_first_node_in_group("player")
 	if !player or !is_instance_valid(player):
+		_proximity_aggro_timer = 0.0
+		return
+	if _is_target_hidden(player):
 		_proximity_aggro_timer = 0.0
 		return
 
@@ -474,6 +514,34 @@ func die():
 		_collision_shape.call_deferred("set_disabled", true)
 	await get_tree().create_timer(1.0).timeout
 	queue_free()
+
+func force_forget_player(player: Node2D, disengage_distance_px: float = 220.0):
+	_clear_attack_tell()
+	_hitbox.monitoring = false
+	target_body = null
+	_forced_disengage_timer = max(0.2, forced_disengage_cooldown_seconds)
+
+	var origin = global_position
+	if player and is_instance_valid(player):
+		origin = player.global_position
+	var away = global_position - origin
+	if away.length_squared() <= 0.0001:
+		away = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0))
+	if away.length_squared() <= 0.0001:
+		away = Vector2.RIGHT
+	away = away.normalized()
+
+	var retreat = max(80.0, disengage_distance_px) * randf_range(0.85, 1.2)
+	var lateral = Vector2(-away.y, away.x) * randf_range(-60.0, 60.0)
+	group_target_pos = global_position + away * retreat + lateral
+	current_state = State.JOIN_GROUP
+
+func _is_target_hidden(target: Node) -> bool:
+	if !target or !is_instance_valid(target):
+		return false
+	if target.has_method("is_stealth_hidden"):
+		return bool(target.is_stealth_hidden())
+	return false
 
 func join_group_behavior(target_pos: Vector2):
 	group_target_pos = target_pos

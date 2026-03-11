@@ -11,6 +11,7 @@ static var _SPRITE_BUILD_CACHE := {}
 @export var trail_particle_amount: int = 48
 @export var trail_point_spacing_px: float = 42.0
 @export var trail_color_blend_speed: float = 8.0
+@export var trail_visual_enabled: bool = false
 @export var idle_death_timeout_seconds: float = 5.0
 
 @export_group("Dash")
@@ -79,6 +80,7 @@ var _hit_flash_tween: Tween = null
 var _enemy_spawn_highlight_points: Array[Vector2] = []
 var _friendly_spawn_highlight_points: Array[Vector2] = []
 var _idle_clock_audio_active: bool = false
+var _stealth_hidden: bool = false
 
 # Trail tracking for logic
 var trail_points: Array[Vector2] = []
@@ -96,7 +98,8 @@ func _ready():
 	# _setup_collision() # Now set in scene
 	add_to_group("player" if is_controllable else "friendly_npc")
 	if is_controllable:
-		_create_trail()
+		if trail_visual_enabled:
+			_create_trail()
 		_last_trail_pos = global_position
 		idle_death_time_left = idle_death_timeout_seconds
 		emit_signal("idle_timer_changed", idle_death_time_left, idle_death_timeout_seconds)
@@ -744,6 +747,15 @@ func _set_idle_clock_audio_active(active: bool):
 		return
 	_idle_clock_audio_active = active
 	emit_signal("idle_clock_active_changed", active)
+
+func set_stealth_hidden(hidden: bool):
+	if _stealth_hidden == hidden:
+		return
+	_stealth_hidden = hidden
+	modulate.a = 0.52 if hidden else 1.0
+
+func is_stealth_hidden() -> bool:
+	return _stealth_hidden
 
 func spawn_effect():
 	# Scale in and blink

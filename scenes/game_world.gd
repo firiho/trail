@@ -36,6 +36,8 @@ const PIXELS_PER_METER = 40.0
 @export var trail_spawn_min_distance_from_player_meters: float = 1.0
 @export var help_call_min_friendly_distance_meters: float = 3.0
 @export var help_call_cluster_radius_meters: float = 3.0
+@export var transformed_spawn_distance_from_player_meters: float = 1.0
+@export var transformed_spawn_jitter_meters: float = 0.35
 
 @export_group("Level Layout")
 @export var use_structured_level_layout: bool = true
@@ -145,8 +147,23 @@ const PIXELS_PER_METER = 40.0
 @export var level1_apple_spawn_start_meter: float = 20.0
 @export var level1_apple_spawn_end_meter: float = 180.0
 @export var level1_pickup_side_range_meters: float = 1.5
+@export var pickup_collect_radius_meters: float = 1.2
 @export var coin_score_value: int = 50
 @export var apple_heal_amount: int = 25
+
+@export_group("Stealth Hiding")
+@export var level1_hide_bush_count: int = 5
+@export var level1_hide_bush_spawn_start_meter: float = 16.0
+@export var level1_hide_bush_spawn_end_meter: float = 170.0
+@export var level1_hide_bush_min_spacing_meters: float = 28.0
+@export var level1_hide_bush_min_side_offset_meters: float = 1.6
+@export var level1_hide_bush_max_side_offset_meters: float = 3.9
+@export var level1_hide_bush_along_jitter_meters: float = 5.0
+@export var level1_hide_bush_scale_min: float = 3.0
+@export var level1_hide_bush_scale_max: float = 4.2
+@export var level1_hide_bush_hide_radius_meters: float = 1.45
+@export var hide_bush_enemy_forget_delay_seconds: float = 3.0
+@export var hide_bush_enemy_disengage_distance_meters: float = 6.0
 
 @export_group("Score")
 @export var kill_base_score: int = 100
@@ -226,6 +243,9 @@ var _floating_warning_label: Label = null
 var _last_help_call_time: float = -9999.0
 var _last_help_hint_time: float = -9999.0
 var _last_arrrgg_time: float = -9999.0
+var _player_hide_overlap_count: int = 0
+var _player_hidden_time_sec: float = 0.0
+var _hide_escape_triggered: bool = false
 
 # Score & Combo
 var _score: int = 0
@@ -420,6 +440,8 @@ func _process(delta):
 	if is_instance_valid(player_ref):
 		_update_chunks()
 		_process_trail_transformation()
+		_collect_nearby_pickups()
+		_update_player_hiding(delta)
 		_update_objective_payload(delta)
 		_update_context_help_hint()
 		_update_level_goal_shield_state(delta)
@@ -955,14 +977,7 @@ func _generate_chunk(chunk_coords: Vector2i):
 	rng.seed = (chunk_coords.x * 10000) + chunk_coords.y
 	
 	# A. Trees
-	var tree_count = rng.randi_range(3, 8)
-	for i in range(tree_count):
-		if tree_textures.size() > 0:
-			var tex = tree_textures[rng.randi() % tree_textures.size()]
-			var tree_pos = _rand_pos_in_chunk(chunk_coords, rng)
-			if _is_pos_inside_level_one_path_corridor(tree_pos):
-				continue
-			_spawn_sprite(container, tex, tree_pos)
+	# Disabled: regular world trees removed so only intentional hiding spots use trees.
 			
 	# B. Bushes (fewer in level 1 so goal bush stays special)
 	var bush_clusters = rng.randi_range(0, 2) if _is_level_one_layout_active() else rng.randi_range(2, 5)
@@ -1009,7 +1024,7 @@ func _generate_chunk(chunk_coords: Vector2i):
 				continue
 			_spawn_anim(container, sheet, anim_pos)
 
-	if !_should_disable_chunk_entity_spawns():
+	if !_should_disable_chunk_entity_spawns() and !_is_player_currently_hidden_for_stealth():
 		# F. Opps (Clusters) - 30% chance
 		if rng.randf() < 0.3:
 			var opps = [Opp1Scene, Opp2Scene, Opp3Scene]
@@ -1105,6 +1120,7 @@ func _place_fixed_entities():
 		_build_level_one_path_layout()
 		_spawn_level_one_enemy_layout()
 		_spawn_level_one_friendly_layout()
+		_spawn_level_one_hide_bush_layout()
 		_spawn_level_one_pickup_layout()
 	else:
 		# Opps (Fixed)
@@ -1468,6 +1484,7 @@ func _spawn_level_goal_bush_cluster(parent: Node2D, pos: Vector2):
 			fallback.texture = _path_goal_texture
 			fallback.scale = Vector2.ONE * max(0.01, level1_goal_scale)
 			fallback.offset = Vector2(0, -_path_goal_texture.get_height() * 0.5)
+			fallback.modulate = Color(1.0, 0.95, 0.76, 1.0)
 			goal.add_child(fallback)
 			_level_goal_blink_targets.append(fallback)
 		return
@@ -1478,6 +1495,7 @@ func _spawn_level_goal_bush_cluster(parent: Node2D, pos: Vector2):
 	center_bush.position = Vector2.ZERO
 	center_bush.scale = Vector2.ONE * clamp((min_scale + max_scale) * 0.8, 1.4, 2.8)
 	center_bush.offset = Vector2(0, -center_tex.get_height() * 0.5)
+	center_bush.modulate = Color(0.86, 0.96, 0.76, 1.0)
 	center_bush.set_meta("goal_drop_target", true)
 	goal.add_child(center_bush)
 	_level_goal_blink_targets.append(center_bush)
@@ -1492,8 +1510,20 @@ func _spawn_level_goal_bush_cluster(parent: Node2D, pos: Vector2):
 		sprite.position = offset
 		sprite.scale = Vector2.ONE * rng.randf_range(min_scale, max_scale)
 		sprite.offset = Vector2(0, -tex.get_height() * 0.5)
+		sprite.modulate = Color(0.80, 0.93, 0.72, 1.0)
 		goal.add_child(sprite)
 		_level_goal_blink_targets.append(sprite)
+
+	if _path_goal_texture:
+		var nest_marker = Sprite2D.new()
+		nest_marker.texture = _path_goal_texture
+		nest_marker.position = Vector2(0.0, -18.0)
+		nest_marker.scale = Vector2.ONE * max(0.7, level1_goal_scale * 0.85)
+		nest_marker.offset = Vector2(0, -_path_goal_texture.get_height() * 0.5)
+		nest_marker.z_index = 8
+		nest_marker.modulate = Color(1.0, 0.93, 0.72, 0.94)
+		goal.add_child(nest_marker)
+		_level_goal_blink_targets.append(nest_marker)
 
 	_spawn_level_goal_border(goal)
 
@@ -1725,6 +1755,120 @@ func _spawn_level_one_friendly_layout():
 		var friendly_scene = friendly_scenes[i % friendly_scenes.size()]
 		_spawn_friendly_cluster(friendly_scene, center_pos)
 
+func _spawn_level_one_hide_bush_layout():
+	var count = max(0, level1_hide_bush_count)
+	if count <= 0:
+		return
+	var hide_textures: Array = tree_textures if !tree_textures.is_empty() else bush_textures
+	if hide_textures.is_empty():
+		return
+	if _level_path_points.size() < 2:
+		_build_level_one_path_points()
+	if _level_path_points.size() < 2:
+		return
+
+	var start_m = clamp(level1_hide_bush_spawn_start_meter, 0.0, level1_path_length_meters)
+	var end_m = clamp(level1_hide_bush_spawn_end_meter, start_m, level1_path_length_meters)
+	var side_min_px = max(
+		level1_hide_bush_min_side_offset_meters * PIXELS_PER_METER,
+		_get_level_one_path_reserved_half_width_meters() * PIXELS_PER_METER + 24.0
+	)
+	var side_max_px = max(side_min_px + 12.0, level1_hide_bush_max_side_offset_meters * PIXELS_PER_METER)
+	var along_jitter_m = max(0.0, level1_hide_bush_along_jitter_meters)
+	var scale_min = min(level1_hide_bush_scale_min, level1_hide_bush_scale_max)
+	var scale_max = max(level1_hide_bush_scale_min, level1_hide_bush_scale_max)
+	var hide_radius_px = max(24.0, level1_hide_bush_hide_radius_meters * PIXELS_PER_METER)
+	var min_spacing_px = max(0.0, level1_hide_bush_min_spacing_meters * PIXELS_PER_METER)
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+	var placed_positions: Array[Vector2] = []
+	var spawned = 0
+	var attempts = max(count * 4, count)
+
+	for _attempt in range(attempts):
+		if spawned >= count:
+			break
+		var t = rng.randf()
+		var meter_at = lerpf(start_m, end_m, t)
+		meter_at += rng.randf_range(-along_jitter_m, along_jitter_m)
+		meter_at = clamp(meter_at, start_m, end_m)
+		var sample = _sample_level_path(meter_at * PIXELS_PER_METER)
+		var side_sign = -1.0 if rng.randf() < 0.5 else 1.0
+		var side_offset = rng.randf_range(side_min_px, side_max_px)
+		var pos = sample["position"] + (sample["perp"] as Vector2) * side_sign * side_offset
+		var too_close = false
+		for placed_pos in placed_positions:
+			if pos.distance_to(placed_pos) < min_spacing_px:
+				too_close = true
+				break
+		if too_close:
+			continue
+
+		var bush_node = Node2D.new()
+		bush_node.name = "HideBush"
+		bush_node.position = pos
+		bush_node.z_index = 12
+		$WorldContainer.add_child(bush_node)
+
+		# Dense hiding forest cluster.
+		var tree_cluster_scale = rng.randf_range(scale_min, scale_max) * 0.34
+		var cluster_offsets = [
+			Vector2(0.0, 0.0),
+			Vector2(-44.0, -24.0),
+			Vector2(44.0, -24.0),
+			Vector2(-58.0, 20.0),
+			Vector2(58.0, 20.0),
+			Vector2(-18.0, 44.0),
+			Vector2(18.0, 44.0),
+			Vector2(0.0, -52.0),
+			Vector2(-72.0, -2.0),
+			Vector2(72.0, -2.0),
+			Vector2(-36.0, 62.0),
+			Vector2(36.0, 62.0)
+		]
+		var hide_area_anchor = Vector2.ZERO
+
+		for idx in range(cluster_offsets.size()):
+			var tex = hide_textures[rng.randi() % hide_textures.size()]
+			var local_pos = cluster_offsets[idx] + Vector2(rng.randf_range(-8.0, 8.0), rng.randf_range(-6.0, 6.0))
+			if idx == 0:
+				hide_area_anchor = local_pos
+
+			var tree = Sprite2D.new()
+			tree.texture = tex
+			tree.position = local_pos
+			tree.scale = Vector2.ONE * tree_cluster_scale * rng.randf_range(0.9, 1.12)
+			tree.offset = Vector2(0, -tex.get_height() * 0.5)
+			tree.z_as_relative = false
+
+			# Back/middle/front layers so player can stand "in" the grove.
+			if local_pos.y >= 16.0:
+				tree.z_index = 102
+			elif local_pos.y >= -8.0:
+				tree.z_index = 16
+			else:
+				tree.z_index = 10
+			tree.modulate = Color.WHITE
+			bush_node.add_child(tree)
+
+		var hide_area = Area2D.new()
+		hide_area.name = "HideArea"
+		hide_area.monitoring = true
+		hide_area.monitorable = true
+		hide_area.position = hide_area_anchor + Vector2(0.0, 20.0)
+		bush_node.add_child(hide_area)
+
+		var area_shape = CollisionShape2D.new()
+		var area_circle = CircleShape2D.new()
+		area_circle.radius = max(hide_radius_px, 84.0)
+		area_shape.shape = area_circle
+		hide_area.add_child(area_shape)
+
+		hide_area.body_entered.connect(_on_hide_bush_body_entered.bind(hide_area))
+		hide_area.body_exited.connect(_on_hide_bush_body_exited.bind(hide_area))
+		placed_positions.append(pos)
+		spawned += 1
+
 func _attach_level_one_objective_to_player(player: Node2D):
 	if !level1_objective_attach_enabled:
 		return
@@ -1816,6 +1960,7 @@ func _spawn_friendly_cluster(scene, center_pos):
 func _process_trail_transformation():
 	if !is_instance_valid(player_ref): return
 	if transform_cooldown > 0: return # Rate limit
+	if _is_player_currently_hidden_for_stealth(): return
 	
 	var target_proximity_px = trail_spawn_target_proximity_meters * PIXELS_PER_METER
 	var max_player_distance_px = trail_spawn_min_distance_from_player_meters * PIXELS_PER_METER
@@ -1871,6 +2016,70 @@ func _process_trail_transformation():
 		player_ref.trail_points.remove_at(idx)
 		if idx < player_ref.trail_point_spawn_times.size():
 			player_ref.trail_point_spawn_times.remove_at(idx)
+
+func _on_hide_bush_body_entered(body: Node2D, _hide_area: Area2D):
+	if !is_instance_valid(player_ref):
+		return
+	if body != player_ref:
+		return
+	_player_hide_overlap_count += 1
+
+func _on_hide_bush_body_exited(body: Node2D, _hide_area: Area2D):
+	if !is_instance_valid(player_ref):
+		return
+	if body != player_ref:
+		return
+	_player_hide_overlap_count = max(0, _player_hide_overlap_count - 1)
+
+func _update_player_hiding(delta: float):
+	if !is_instance_valid(player_ref):
+		return
+	if game_state != PLAYING:
+		_player_hidden_time_sec = 0.0
+		_hide_escape_triggered = false
+		_set_player_hidden_state(false)
+		return
+
+	var inside_hide_bush = _player_hide_overlap_count > 0
+	if inside_hide_bush:
+		_player_hidden_time_sec += max(0.0, delta)
+		_set_player_hidden_state(true)
+		if !_hide_escape_triggered and _player_hidden_time_sec >= hide_bush_enemy_forget_delay_seconds:
+			_hide_escape_triggered = true
+			_make_enemies_forget_player()
+	else:
+		_player_hidden_time_sec = 0.0
+		_hide_escape_triggered = false
+		_set_player_hidden_state(false)
+
+func _set_player_hidden_state(hidden: bool):
+	if !is_instance_valid(player_ref):
+		return
+	if player_ref.has_method("set_stealth_hidden"):
+		player_ref.set_stealth_hidden(hidden)
+	else:
+		player_ref.modulate.a = 0.55 if hidden else 1.0
+
+func _is_player_currently_hidden_for_stealth() -> bool:
+	if _player_hide_overlap_count > 0:
+		return true
+	if !is_instance_valid(player_ref):
+		return false
+	if player_ref.has_method("is_stealth_hidden"):
+		return player_ref.is_stealth_hidden()
+	return false
+
+func _make_enemies_forget_player():
+	if !is_instance_valid(player_ref):
+		return
+	var disengage_distance_px = max(80.0, hide_bush_enemy_disengage_distance_meters * PIXELS_PER_METER)
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		if !is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		if enemy.get("target_body") != player_ref:
+			continue
+		if enemy.has_method("force_forget_player"):
+			enemy.force_forget_player(player_ref, disengage_distance_px)
 
 func _call_for_help():
 	if !is_instance_valid(player_ref):
@@ -1944,7 +2153,10 @@ func _get_nearest_in_group(pos: Vector2, group_name: String) -> Node2D:
 	return nearest
 
 func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
+	if _is_player_currently_hidden_for_stealth():
+		return
 	var container = $WorldContainer
+	var spawn_pos = _get_transformed_spawn_position(pos, template)
 	if type == "enemy":
 		var opps = [Opp1Scene, Opp2Scene, Opp3Scene]
 		# Find the scene that matches the template's folder if possible
@@ -1959,7 +2171,7 @@ func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 				inst.queue_free()
 		
 		var new_opp = scn.instantiate()
-		new_opp.position = pos
+		new_opp.position = spawn_pos
 		if "group_id" in template:
 			new_opp.group_id = template.group_id
 		container.add_child(new_opp)
@@ -1984,7 +2196,7 @@ func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 				inst.queue_free()
 				
 		var new_friend = scn.instantiate()
-		new_friend.position = pos
+		new_friend.position = spawn_pos
 		new_friend.is_controllable = false
 		container.add_child(new_friend)
 		_register_audio_hooks_for_player(new_friend)
@@ -1994,6 +2206,32 @@ func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 			new_friend.spawn_effect()
 		
 		transform_cooldown = TRANSFORM_COOLDOWN_MAX
+
+func _get_transformed_spawn_position(base_pos: Vector2, template: Node2D) -> Vector2:
+	if !is_instance_valid(player_ref):
+		return base_pos
+
+	var desired_distance_px = max(8.0, transformed_spawn_distance_from_player_meters * PIXELS_PER_METER)
+	var jitter_px = max(0.0, transformed_spawn_jitter_meters * PIXELS_PER_METER)
+
+	var away_dir = base_pos - player_ref.global_position
+	if away_dir.length_squared() <= 0.0001 and template and is_instance_valid(template):
+		away_dir = template.global_position - player_ref.global_position
+	if away_dir.length_squared() <= 0.0001:
+		var angle = randf() * TAU
+		away_dir = Vector2(cos(angle), sin(angle))
+	away_dir = away_dir.normalized()
+
+	var lateral_dir = Vector2(-away_dir.y, away_dir.x)
+	var radial_jitter = randf_range(-jitter_px * 0.25, jitter_px)
+	var lateral_jitter = randf_range(-jitter_px, jitter_px)
+	var spawn_pos = player_ref.global_position + away_dir * (desired_distance_px + radial_jitter)
+	spawn_pos += lateral_dir * lateral_jitter
+
+	var min_dist_px = desired_distance_px * 0.8
+	if spawn_pos.distance_to(player_ref.global_position) < min_dist_px:
+		spawn_pos = player_ref.global_position + away_dir * min_dist_px
+	return spawn_pos
 
 # =====================================================================
 # PICKUPS
@@ -2045,7 +2283,7 @@ func _spawn_coin_pickup(pos: Vector2):
 
 	var shape = CollisionShape2D.new()
 	var circle = CircleShape2D.new()
-	circle.radius = 20.0
+	circle.radius = max(20.0, pickup_collect_radius_meters * PIXELS_PER_METER)
 	shape.shape = circle
 	pickup.add_child(shape)
 
@@ -2058,12 +2296,14 @@ func _spawn_coin_pickup(pos: Vector2):
 		sf.add_frame("spin", tex)
 
 	var sprite = AnimatedSprite2D.new()
+	sprite.name = "PickupVisual"
 	sprite.sprite_frames = sf
 	sprite.scale = Vector2(0.35, 0.35)
 	sprite.offset = Vector2(0, -_coin_frames[0].get_height() * 0.5)
 	sprite.play("spin")
 	pickup.add_child(sprite)
 
+	pickup.add_to_group("pickup_collectible")
 	pickup.body_entered.connect(_on_pickup_body_entered.bind(pickup))
 	$WorldContainer.add_child(pickup)
 
@@ -2080,25 +2320,51 @@ func _spawn_apple_pickup(pos: Vector2):
 
 	var shape = CollisionShape2D.new()
 	var circle = CircleShape2D.new()
-	circle.radius = 22.0
+	circle.radius = max(22.0, pickup_collect_radius_meters * PIXELS_PER_METER)
 	shape.shape = circle
 	pickup.add_child(shape)
 
 	var sprite = Sprite2D.new()
+	sprite.name = "PickupVisual"
 	sprite.texture = _apple_texture
 	sprite.scale = Vector2(0.4, 0.4)
 	sprite.offset = Vector2(0, -_apple_texture.get_height() * 0.5)
 	pickup.add_child(sprite)
 
+	pickup.add_to_group("pickup_collectible")
 	pickup.body_entered.connect(_on_pickup_body_entered.bind(pickup))
 	$WorldContainer.add_child(pickup)
 
 func _on_pickup_body_entered(body: Node2D, pickup: Area2D):
 	if !body.is_in_group("player"):
 		return
-	if !is_instance_valid(pickup):
-		return
+	_collect_pickup(pickup)
 
+func _collect_nearby_pickups():
+	if game_state != PLAYING:
+		return
+	if !is_instance_valid(player_ref):
+		return
+	var collect_radius_px = max(8.0, pickup_collect_radius_meters * PIXELS_PER_METER)
+	for node in get_tree().get_nodes_in_group("pickup_collectible"):
+		var pickup = node as Area2D
+		if !pickup or !is_instance_valid(pickup) or pickup.is_queued_for_deletion():
+			continue
+		if pickup.get_meta("collected", false):
+			continue
+		if player_ref.global_position.distance_to(pickup.global_position) <= collect_radius_px:
+			_collect_pickup(pickup)
+
+func _collect_pickup(pickup: Area2D):
+	if !is_instance_valid(pickup) or pickup.is_queued_for_deletion():
+		return
+	if pickup.get_meta("collected", false):
+		return
+	pickup.set_meta("collected", true)
+	pickup.set_deferred("monitoring", false)
+	var pickup_shape := pickup.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if pickup_shape:
+		pickup_shape.set_deferred("disabled", true)
 	var pickup_type = pickup.get_meta("pickup_type", "")
 
 	if pickup_type == "coin":
@@ -2114,7 +2380,29 @@ func _on_pickup_body_entered(body: Node2D, pickup: Area2D):
 		_spawn_pickup_particles(pickup.global_position, Color(0.4, 1.0, 0.5, 1.0))
 		_show_floating_text("+" + str(apple_heal_amount) + " HP", Color(0.5, 1.0, 0.6, 1.0))
 
-	pickup.queue_free()
+	_animate_pickup_collection(pickup, pickup_type)
+
+func _animate_pickup_collection(pickup: Area2D, pickup_type: String):
+	if !is_instance_valid(pickup):
+		return
+
+	var jump_height_px = 22.0 if pickup_type == "coin" else 18.0
+	var base_y = pickup.position.y
+	var tween = create_tween()
+	tween.tween_property(pickup, "position:y", base_y - jump_height_px, 0.12).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(pickup, "position:y", base_y - jump_height_px * 0.55, 0.14).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tween.parallel().tween_property(pickup, "scale", Vector2(1.16, 1.16), 0.10).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.parallel().tween_property(pickup, "modulate:a", 0.0, 0.26).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+	var visual := pickup.get_node_or_null("PickupVisual") as Node2D
+	if visual:
+		var rot = 0.55 if pickup_type == "coin" else -0.35
+		tween.parallel().tween_property(visual, "rotation", rot, 0.26).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+	tween.finished.connect(func():
+		if is_instance_valid(pickup):
+			pickup.queue_free()
+	)
 
 func _spawn_pickup_particles(pos: Vector2, color: Color):
 	var particles = CPUParticles2D.new()
