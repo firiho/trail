@@ -24,6 +24,13 @@ var _progress_bar_root: Control = null
 var _progress_bar_bg: ColorRect = null
 var _progress_bar_fill: ColorRect = null
 var _progress_bar_icon: Label = null
+var _wanted_root: Control = null
+var _wanted_panel: Panel = null
+var _wanted_accent: ColorRect = null
+var _wanted_title: Label = null
+var _wanted_stars: Label = null
+var _wanted_count: Label = null
+var _wanted_level: int = 0
 
 var _active_tween: Tween = null
 var _level_select_screen: Control = null
@@ -41,8 +48,10 @@ func _ready():
 	_proximity_bar_root.visible = false
 	_ensure_score_label()
 	_ensure_combo_label()
+	_ensure_wanted_display()
 	if _score_label: _score_label.visible = false
 	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
 
 func update_health(current_hp, max_hp):
 	health_bar.max_value = max_hp
@@ -66,6 +75,7 @@ func show_start_screen():
 	if _proximity_bar_root: _proximity_bar_root.visible = false
 	if _score_label: _score_label.visible = false
 	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
 	if _level_select_screen: _level_select_screen.visible = false
 	
 	_fade_in(start_screen)
@@ -82,7 +92,15 @@ func show_game_over():
 	if _proximity_bar_root: _proximity_bar_root.visible = false
 	if _score_label: _score_label.visible = false
 	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
 	if _level_select_screen: _level_select_screen.visible = false
+	_configure_end_screen(
+		game_over_screen,
+		Color(0.18, 0.03, 0.04, 0.82),
+		Color(0.11, 0.02, 0.03, 0.86),
+		Color(1.0, 0.55, 0.48, 1.0),
+		Color(0.96, 0.82, 0.74, 0.92)
+	)
 	
 	_fade_in(game_over_screen)
 	_animate_game_over_screen()
@@ -97,6 +115,7 @@ func show_hud():
 	damage_bar.visible = true
 	if _proximity_bar_root: _proximity_bar_root.visible = true
 	if _score_label: _score_label.visible = true
+	if _wanted_root: _wanted_root.visible = true
 	if _level_select_screen: _level_select_screen.visible = false
 
 func show_win():
@@ -110,7 +129,15 @@ func show_win():
 	if _proximity_bar_root: _proximity_bar_root.visible = false
 	if _score_label: _score_label.visible = false
 	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
 	if _level_select_screen: _level_select_screen.visible = false
+	_configure_end_screen(
+		win_screen,
+		Color(0.03, 0.18, 0.10, 0.78),
+		Color(0.03, 0.09, 0.05, 0.86),
+		Color(0.72, 1.0, 0.76, 1.0),
+		Color(0.88, 0.98, 0.90, 0.92)
+	)
 
 	_fade_in(win_screen)
 	_animate_win_screen()
@@ -131,6 +158,7 @@ func show_level_select(max_unlocked: int, total_levels: int = 10):
 	if _proximity_bar_root: _proximity_bar_root.visible = false
 	if _score_label: _score_label.visible = false
 	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
 
 	# Build or rebuild
 	if _level_select_screen and is_instance_valid(_level_select_screen):
@@ -528,6 +556,54 @@ func _animate_win_screen():
 	_active_tween.tween_property(label, "scale", Vector2(1.0, 1.0), 1.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	_active_tween.parallel().tween_property(instructions, "modulate:a", 1.0, 0.8)
 
+func _configure_end_screen(screen: Control, bg_color: Color, panel_color: Color, title_color: Color, body_color: Color):
+	if !screen:
+		return
+	var bg = screen.get_node_or_null("Background")
+	if bg and bg is ColorRect:
+		bg.color = bg_color
+
+	var panel = screen.get_node_or_null("Panel")
+	if panel and panel is ColorRect:
+		panel.color = panel_color
+		panel.offset_left = -390.0
+		panel.offset_top = -246.0
+		panel.offset_right = 390.0
+		panel.offset_bottom = 272.0
+
+	var title = screen.get_node_or_null("Label")
+	if title and title is Label:
+		title.offset_left = -300.0
+		title.offset_top = -186.0
+		title.offset_right = 300.0
+		title.offset_bottom = -86.0
+		title.add_theme_font_size_override("font_size", 34)
+		title.add_theme_color_override("font_color", title_color)
+		title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
+		title.add_theme_constant_override("shadow_outline_size", 10)
+
+	var instructions = screen.get_node_or_null("Instructions")
+	if instructions and instructions is Label:
+		instructions.offset_left = -300.0
+		instructions.offset_top = -116.0
+		instructions.offset_right = 300.0
+		instructions.offset_bottom = -56.0
+		instructions.add_theme_font_size_override("font_size", 11)
+		instructions.add_theme_color_override("font_color", body_color)
+		instructions.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+		instructions.add_theme_constant_override("shadow_outline_size", 5)
+
+	var recap = screen.get_node_or_null("Recap")
+	if recap and recap is Label:
+		recap.offset_left = -304.0
+		recap.offset_top = 146.0
+		recap.offset_right = 304.0
+		recap.offset_bottom = 234.0
+		recap.add_theme_font_size_override("font_size", 11)
+		recap.add_theme_color_override("font_color", Color(body_color.r, body_color.g, body_color.b, 0.82))
+		recap.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.84))
+		recap.add_theme_constant_override("shadow_outline_size", 4)
+
 # =====================================================================
 # STATS OVERLAY ON END SCREENS
 # =====================================================================
@@ -551,22 +627,22 @@ func _show_stats_panel(parent_screen: Control, stats: Dictionary, accent_color: 
 	_stats_panel.name = "StatsPanel"
 
 	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.04, 0.05, 0.08, 0.75)
-	style.corner_radius_top_left = 10
-	style.corner_radius_top_right = 10
-	style.corner_radius_bottom_left = 10
-	style.corner_radius_bottom_right = 10
+	style.bg_color = Color(0.03, 0.04, 0.06, 0.84)
+	style.corner_radius_top_left = 14
+	style.corner_radius_top_right = 14
+	style.corner_radius_bottom_left = 14
+	style.corner_radius_bottom_right = 14
 	style.border_width_top = 2
 	style.border_width_bottom = 2
 	style.border_width_left = 2
 	style.border_width_right = 2
-	style.border_color = Color(accent_color.r, accent_color.g, accent_color.b, 0.4)
-	style.content_margin_left = 20.0
-	style.content_margin_right = 20.0
-	style.content_margin_top = 14.0
-	style.content_margin_bottom = 14.0
-	style.shadow_color = Color(0, 0, 0, 0.4)
-	style.shadow_size = 6
+	style.border_color = Color(accent_color.r, accent_color.g, accent_color.b, 0.58)
+	style.content_margin_left = 22.0
+	style.content_margin_right = 22.0
+	style.content_margin_top = 18.0
+	style.content_margin_bottom = 16.0
+	style.shadow_color = Color(0, 0, 0, 0.52)
+	style.shadow_size = 10
 	_stats_panel.add_theme_stylebox_override("panel", style)
 
 	var vbox = VBoxContainer.new()
@@ -577,7 +653,7 @@ func _show_stats_panel(parent_screen: Control, stats: Dictionary, accent_color: 
 	var title_label = Label.new()
 	title_label.text = "- STATS -"
 	title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title_label.add_theme_font_size_override("font_size", 12)
+	title_label.add_theme_font_size_override("font_size", 13)
 	title_label.add_theme_color_override("font_color", accent_color)
 	title_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
 	title_label.add_theme_constant_override("shadow_outline_size", 3)
@@ -606,7 +682,7 @@ func _show_stats_panel(parent_screen: Control, stats: Dictionary, accent_color: 
 
 		var key_label = Label.new()
 		key_label.text = entry[0]
-		key_label.add_theme_font_size_override("font_size", 9)
+		key_label.add_theme_font_size_override("font_size", 10)
 		key_label.add_theme_color_override("font_color", Color(0.65, 0.7, 0.8, 0.85))
 		key_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
 		key_label.add_theme_constant_override("shadow_outline_size", 2)
@@ -616,7 +692,7 @@ func _show_stats_panel(parent_screen: Control, stats: Dictionary, accent_color: 
 		var val_label = Label.new()
 		val_label.text = entry[1]
 		val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		val_label.add_theme_font_size_override("font_size", 10)
+		val_label.add_theme_font_size_override("font_size", 11)
 		val_label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0, 0.95))
 		val_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
 		val_label.add_theme_constant_override("shadow_outline_size", 2)
@@ -659,15 +735,15 @@ func _show_stats_panel(parent_screen: Control, stats: Dictionary, accent_color: 
 	if recap_node:
 		recap_node.visible = false
 
-	# Position stats panel below the title
+	# Position stats panel lower so the title/instructions have breathing room.
 	_stats_panel.anchor_left = 0.5
 	_stats_panel.anchor_right = 0.5
 	_stats_panel.anchor_top = 0.5
 	_stats_panel.anchor_bottom = 0.5
-	_stats_panel.offset_left = -130
-	_stats_panel.offset_right = 130
-	_stats_panel.offset_top = -80
-	_stats_panel.offset_bottom = 180
+	_stats_panel.offset_left = -156
+	_stats_panel.offset_right = 156
+	_stats_panel.offset_top = -52
+	_stats_panel.offset_bottom = 240
 
 	# Fade in the stats
 	_stats_panel.modulate.a = 0
@@ -743,6 +819,36 @@ func update_progress(ratio: float):
 	var color = Color(0.3, 0.6, 1.0, 0.9).lerp(Color(0.3, 1.0, 0.5, 0.9), ratio)
 	_progress_bar_fill.color = color
 	_progress_bar_root.visible = health_bar and health_bar.visible
+
+func update_wanted_level(level: int, attacker_count: int):
+	_ensure_wanted_display()
+	level = clamp(level, 0, 5)
+	attacker_count = max(0, attacker_count)
+
+	var wanted_star_text = "★ ".repeat(level).strip_edges()
+	_wanted_stars.text = wanted_star_text if level > 0 else "SAFE"
+	_wanted_count.text = "%d HUNTERS" % attacker_count if attacker_count > 0 else "NO HEAT"
+
+	var danger = float(level) / 5.0
+	var title_color = Color(0.95, 0.82, 0.48, 1.0).lerp(Color(1.0, 0.38, 0.28, 1.0), danger)
+	var star_color = Color(1.0, 0.93, 0.60, 1.0).lerp(Color(1.0, 0.38, 0.28, 1.0), danger)
+	var panel_style = _wanted_panel.get_theme_stylebox("panel") as StyleBoxFlat
+	if panel_style:
+		panel_style.bg_color = Color(0.06 + 0.16 * danger, 0.035, 0.045, 0.72 + 0.12 * danger)
+		panel_style.border_color = Color(0.72 + 0.24 * danger, 0.36 + 0.18 * danger, 0.16, 0.88)
+	_wanted_accent.color = Color(0.90, 0.62, 0.24, 0.85).lerp(Color(1.0, 0.30, 0.22, 0.95), danger)
+	_wanted_title.modulate = title_color
+	_wanted_stars.modulate = star_color
+	_wanted_count.modulate = Color(1.0, 0.95, 0.88, 0.78 + 0.22 * danger)
+
+	var pulse = 1.0 + 0.05 * danger * sin(Time.get_ticks_msec() / max(65.0, 160.0 - 18.0 * level))
+	_wanted_stars.scale = Vector2.ONE * pulse
+
+	if level != _wanted_level:
+		_wanted_level = level
+		var tween = create_tween()
+		tween.tween_property(_wanted_root, "scale", Vector2(1.08, 1.08), 0.08)
+		tween.tween_property(_wanted_root, "scale", Vector2(1.0, 1.0), 0.14)
 
 func _ensure_score_label():
 	if _score_label:
@@ -821,3 +927,78 @@ func _ensure_progress_bar():
 	_progress_bar_icon.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
 	_progress_bar_icon.add_theme_constant_override("shadow_outline_size", 4)
 	_progress_bar_root.add_child(_progress_bar_icon)
+
+func _ensure_wanted_display():
+	if _wanted_root:
+		return
+
+	_wanted_root = Control.new()
+	_wanted_root.name = "WantedRoot"
+	_wanted_root.anchor_left = 1.0
+	_wanted_root.anchor_right = 1.0
+	_wanted_root.offset_left = -300.0
+	_wanted_root.offset_top = 54.0
+	_wanted_root.offset_right = -18.0
+	_wanted_root.offset_bottom = 154.0
+	_wanted_root.pivot_offset = Vector2(141.0, 50.0)
+	add_child(_wanted_root)
+
+	_wanted_panel = Panel.new()
+	_wanted_panel.name = "WantedPanel"
+	_wanted_panel.position = Vector2.ZERO
+	_wanted_panel.size = Vector2(282.0, 100.0)
+	var panel_style = StyleBoxFlat.new()
+	panel_style.bg_color = Color(0.08, 0.04, 0.05, 0.76)
+	panel_style.border_color = Color(0.78, 0.46, 0.18, 0.88)
+	panel_style.set_border_width_all(2)
+	panel_style.corner_radius_top_left = 16
+	panel_style.corner_radius_top_right = 6
+	panel_style.corner_radius_bottom_left = 16
+	panel_style.corner_radius_bottom_right = 16
+	panel_style.shadow_color = Color(0, 0, 0, 0.28)
+	panel_style.shadow_size = 10
+	panel_style.shadow_offset = Vector2(0, 5)
+	_wanted_panel.add_theme_stylebox_override("panel", panel_style)
+	_wanted_root.add_child(_wanted_panel)
+
+	_wanted_accent = ColorRect.new()
+	_wanted_accent.name = "WantedAccent"
+	_wanted_accent.position = Vector2(0.0, 0.0)
+	_wanted_accent.size = Vector2(282.0, 8.0)
+	_wanted_accent.color = Color(0.92, 0.64, 0.22, 0.88)
+	_wanted_panel.add_child(_wanted_accent)
+
+	_wanted_title = Label.new()
+	_wanted_title.name = "WantedTitle"
+	_wanted_title.position = Vector2(18.0, 18.0)
+	_wanted_title.size = Vector2(120.0, 18.0)
+	_wanted_title.text = "WANTED LEVEL"
+	_wanted_title.add_theme_font_size_override("font_size", 11)
+	_wanted_title.add_theme_color_override("font_color", Color(1.0, 0.9, 0.58, 1.0))
+	_wanted_title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_wanted_title.add_theme_constant_override("shadow_outline_size", 6)
+	_wanted_panel.add_child(_wanted_title)
+
+	_wanted_stars = Label.new()
+	_wanted_stars.name = "WantedStars"
+	_wanted_stars.position = Vector2(16.0, 38.0)
+	_wanted_stars.size = Vector2(250.0, 30.0)
+	_wanted_stars.text = "SAFE"
+	_wanted_stars.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_wanted_stars.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_wanted_stars.add_theme_font_size_override("font_size", 24)
+	_wanted_stars.add_theme_color_override("font_color", Color(1.0, 0.94, 0.56, 1.0))
+	_wanted_stars.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
+	_wanted_stars.add_theme_constant_override("shadow_outline_size", 8)
+	_wanted_panel.add_child(_wanted_stars)
+
+	_wanted_count = Label.new()
+	_wanted_count.name = "WantedCount"
+	_wanted_count.position = Vector2(18.0, 74.0)
+	_wanted_count.size = Vector2(160.0, 16.0)
+	_wanted_count.text = "NO HEAT"
+	_wanted_count.add_theme_font_size_override("font_size", 10)
+	_wanted_count.add_theme_color_override("font_color", Color(1.0, 0.92, 0.84, 0.72))
+	_wanted_count.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
+	_wanted_count.add_theme_constant_override("shadow_outline_size", 6)
+	_wanted_panel.add_child(_wanted_count)

@@ -11,6 +11,7 @@ static var _persisted_max_combo: int = 0
 static var _persisted_play_start_time: float = -1.0
 static var _max_unlocked_level: int = 1
 static var _go_to_level_select_after_reload: bool = false
+static var _has_persisted_run_stats: bool = false
 
 const TILE_PX = 32
 const CHUNK_SIZE = 32
@@ -162,6 +163,8 @@ const PIXELS_PER_METER = 40.0
 @export var level1_hide_bush_scale_min: float = 3.0
 @export var level1_hide_bush_scale_max: float = 4.2
 @export var level1_hide_bush_hide_radius_meters: float = 1.45
+@export var level1_hide_tree_diamond_half_width_meters: float = 1.15
+@export var level1_hide_tree_diamond_half_height_meters: float = 0.78
 @export var hide_bush_enemy_forget_delay_seconds: float = 3.0
 @export var hide_bush_enemy_disengage_distance_meters: float = 6.0
 
@@ -387,8 +390,8 @@ func start_game():
 		_persisted_play_start_time = -1.0
 	_play_ui_start_sfx()
 	ui.show_hud()
-	# Restore persisted stats from previous levels
-	if _persisted_level > 1:
+	# Restore carried run stats when advancing to the next level.
+	if _has_persisted_run_stats:
 		_score = _persisted_score
 		_enemies_killed = _persisted_enemies_killed
 		_coins_collected = _persisted_coins
@@ -420,6 +423,7 @@ func restart_game():
 	_persisted_damage = 0
 	_persisted_max_combo = 0
 	_persisted_play_start_time = -1.0
+	_has_persisted_run_stats = false
 	_go_to_level_select_after_reload = true
 	_auto_start_after_reload = false
 	get_tree().reload_current_scene()
@@ -451,6 +455,7 @@ func _process(delta):
 		# Update UI with proximity to nearest group
 		var nearest_enemy = _get_nearest_in_group(player_ref.global_position, "enemy")
 		var nearest_friend = _get_nearest_in_group(player_ref.global_position, "friendly_npc")
+		var attackers = _get_attackers_chasing_player()
 		var enemy_dist_m = -1.0
 		var friend_dist_m = -1.0
 		var nearest_enemy_color_key := ""
@@ -463,8 +468,12 @@ func _process(delta):
 
 		if ui and ui.has_method("update_transform_info"):
 			ui.update_transform_info(enemy_dist_m, friend_dist_m, nearest_enemy_color_key, trail_spawn_target_proximity_meters)
+		if ui and ui.has_method("update_wanted_level"):
+			ui.update_wanted_level(_get_wanted_star_level(attackers.size()), attackers.size())
 		_update_dynamic_music_blend(delta, enemy_dist_m)
 	else:
+		if ui and ui.has_method("update_wanted_level"):
+			ui.update_wanted_level(0, 0)
 		_update_dynamic_music_blend(delta, -1.0)
 
 	if transform_cooldown > 0:
@@ -487,6 +496,7 @@ func _advance_to_next_level():
 	_persisted_max_combo = _max_combo
 	_persisted_play_start_time = _play_start_time
 	_persisted_level = current_level_id + 1
+	_has_persisted_run_stats = true
 	
 	# Reload the scene to start next level
 	_do_next_level_reload()
@@ -518,6 +528,7 @@ func _on_ui_level_selected(level_id: int):
 	_persisted_damage = 0
 	_persisted_max_combo = 0
 	_persisted_play_start_time = -1.0
+	_has_persisted_run_stats = false
 	_auto_start_after_reload = true
 	get_tree().reload_current_scene()
 
@@ -532,6 +543,7 @@ func _on_ui_retry():
 	_persisted_damage = 0
 	_persisted_max_combo = 0
 	_persisted_play_start_time = -1.0
+	_has_persisted_run_stats = false
 	_auto_start_after_reload = true
 	get_tree().reload_current_scene()
 
@@ -550,6 +562,7 @@ func _on_ui_back_to_levels():
 	_persisted_damage = 0
 	_persisted_max_combo = 0
 	_persisted_play_start_time = -1.0
+	_has_persisted_run_stats = false
 	_go_to_level_select_after_reload = true
 	_auto_start_after_reload = false
 	get_tree().reload_current_scene()
@@ -1553,6 +1566,53 @@ func _spawn_level_goal_border(goal: Node2D):
 	body.add_child(shape)
 	_level_goal_border_collision = shape
 
+func _get_hide_tree_diamond_offsets() -> Array[Vector2]:
+	var half_width_px = max(28.0, level1_hide_tree_diamond_half_width_meters * PIXELS_PER_METER)
+	var half_height_px = max(20.0, level1_hide_tree_diamond_half_height_meters * PIXELS_PER_METER)
+	return [
+		Vector2(0.0, -half_height_px),
+		Vector2(-half_width_px, 0.0),
+		Vector2(half_width_px, 0.0),
+		Vector2(0.0, half_height_px)
+	]
+
+func _spawn_hide_tree_diamond(parent: Node2D, hide_textures: Array, base_scale: float, hide_radius_px: float, rng: RandomNumberGenerator):
+	var cluster_offsets = _get_hide_tree_diamond_offsets()
+
+	for local_pos in cluster_offsets:
+		var tex = hide_textures[rng.randi() % hide_textures.size()]
+		var tree = Sprite2D.new()
+		tree.texture = tex
+		tree.position = local_pos
+		tree.scale = Vector2.ONE * base_scale * rng.randf_range(0.96, 1.04)
+		tree.offset = Vector2(0, -tex.get_height() * 0.5)
+		tree.z_as_relative = false
+
+		if local_pos.y > 0.0:
+			tree.z_index = 102
+		elif is_zero_approx(local_pos.y):
+			tree.z_index = 16
+		else:
+			tree.z_index = 10
+		parent.add_child(tree)
+
+	var hide_area = Area2D.new()
+	hide_area.name = "HideArea"
+	hide_area.monitoring = true
+	hide_area.monitorable = true
+	hide_area.position = Vector2(0.0, 12.0)
+	parent.add_child(hide_area)
+
+	var area_shape = CollisionShape2D.new()
+	var area_circle = CircleShape2D.new()
+	var diamond_half_width_px = max(28.0, level1_hide_tree_diamond_half_width_meters * PIXELS_PER_METER)
+	area_circle.radius = max(hide_radius_px, diamond_half_width_px * 0.72)
+	area_shape.shape = area_circle
+	hide_area.add_child(area_shape)
+
+	hide_area.body_entered.connect(_on_hide_bush_body_entered.bind(hide_area))
+	hide_area.body_exited.connect(_on_hide_bush_body_exited.bind(hide_area))
+
 func _update_level_goal_shield_state(delta: float):
 	var should_block = false
 	var show_warning = false
@@ -1809,63 +1869,8 @@ func _spawn_level_one_hide_bush_layout():
 		bush_node.position = pos
 		bush_node.z_index = 12
 		$WorldContainer.add_child(bush_node)
-
-		# Dense hiding forest cluster.
 		var tree_cluster_scale = rng.randf_range(scale_min, scale_max) * 0.34
-		var cluster_offsets = [
-			Vector2(0.0, 0.0),
-			Vector2(-44.0, -24.0),
-			Vector2(44.0, -24.0),
-			Vector2(-58.0, 20.0),
-			Vector2(58.0, 20.0),
-			Vector2(-18.0, 44.0),
-			Vector2(18.0, 44.0),
-			Vector2(0.0, -52.0),
-			Vector2(-72.0, -2.0),
-			Vector2(72.0, -2.0),
-			Vector2(-36.0, 62.0),
-			Vector2(36.0, 62.0)
-		]
-		var hide_area_anchor = Vector2.ZERO
-
-		for idx in range(cluster_offsets.size()):
-			var tex = hide_textures[rng.randi() % hide_textures.size()]
-			var local_pos = cluster_offsets[idx] + Vector2(rng.randf_range(-8.0, 8.0), rng.randf_range(-6.0, 6.0))
-			if idx == 0:
-				hide_area_anchor = local_pos
-
-			var tree = Sprite2D.new()
-			tree.texture = tex
-			tree.position = local_pos
-			tree.scale = Vector2.ONE * tree_cluster_scale * rng.randf_range(0.9, 1.12)
-			tree.offset = Vector2(0, -tex.get_height() * 0.5)
-			tree.z_as_relative = false
-
-			# Back/middle/front layers so player can stand "in" the grove.
-			if local_pos.y >= 16.0:
-				tree.z_index = 102
-			elif local_pos.y >= -8.0:
-				tree.z_index = 16
-			else:
-				tree.z_index = 10
-			tree.modulate = Color.WHITE
-			bush_node.add_child(tree)
-
-		var hide_area = Area2D.new()
-		hide_area.name = "HideArea"
-		hide_area.monitoring = true
-		hide_area.monitorable = true
-		hide_area.position = hide_area_anchor + Vector2(0.0, 20.0)
-		bush_node.add_child(hide_area)
-
-		var area_shape = CollisionShape2D.new()
-		var area_circle = CircleShape2D.new()
-		area_circle.radius = max(hide_radius_px, 84.0)
-		area_shape.shape = area_circle
-		hide_area.add_child(area_shape)
-
-		hide_area.body_entered.connect(_on_hide_bush_body_entered.bind(hide_area))
-		hide_area.body_exited.connect(_on_hide_bush_body_exited.bind(hide_area))
+		_spawn_hide_tree_diamond(bush_node, hide_textures, tree_cluster_scale, hide_radius_px, rng)
 		placed_positions.append(pos)
 		spawned += 1
 
@@ -2127,6 +2132,19 @@ func _get_attackers_chasing_player() -> Array:
 		if enemy.get("target_body") == player_ref:
 			attackers.append(enemy)
 	return attackers
+
+func _get_wanted_star_level(attacker_count: int) -> int:
+	if attacker_count > 10:
+		return 5
+	if attacker_count >= 8:
+		return 4
+	if attacker_count >= 6:
+		return 3
+	if attacker_count >= 4:
+		return 2
+	if attacker_count >= 2:
+		return 1
+	return 0
 
 func _get_nearest_node_from_list(pos: Vector2, nodes: Array) -> Node2D:
 	var nearest: Node2D = null

@@ -28,6 +28,12 @@ var _dodge_chance: float = 0.0
 @export var proximity_aggro_enabled: bool = true
 @export var proximity_aggro_range_meters: float = 5.0
 @export var proximity_aggro_linger_seconds: float = 1.0
+@export_group("Suspicion")
+@export var suspicion_enabled: bool = true
+@export var suspicion_range_meters: float = 7.0
+@export var suspicion_decay_seconds: float = 1.2
+@export var suspicion_move_speed_multiplier: float = 0.42
+@export var suspicion_arrive_distance_meters: float = 1.1
 @export_group("Attack Telegraph")
 @export var attack_tell_enabled: bool = true
 @export var attack_tell_duration_seconds: float = 0.35
@@ -35,7 +41,7 @@ var _dodge_chance: float = 0.0
 @export var forced_disengage_cooldown_seconds: float = 3.2
 
 # State
-enum State { IDLE, CHASE, ATTACK, HURT, DYING, JOIN_GROUP }
+enum State { IDLE, SUSPICIOUS, CHASE, ATTACK, HURT, DYING, JOIN_GROUP }
 var current_state = State.IDLE
 var target_body: CharacterBody2D = null
 var group_target_pos: Vector2 = Vector2.ZERO
@@ -48,6 +54,7 @@ var health = 60
 var _current_anim: String = ""
 var _loaded_anims: Array[String] = []
 var _proximity_aggro_timer: float = 0.0
+var _suspicion_last_known_pos: Vector2 = Vector2.ZERO
 var _attack_tell_progress: float = 0.0
 var _attack_tell_visible: bool = false
 var _attack_tell_tween: Tween = null
@@ -55,6 +62,7 @@ var _attack_tell_particles: CPUParticles2D = null
 var _attack_tell_label: Label = null
 var _attack_tell_label_tween: Tween = null
 var _forced_disengage_timer: float = 0.0
+var _suspicion_label: Label = null
 
 func _ready():
 	add_to_group("enemy")
@@ -63,6 +71,7 @@ func _ready():
 	_build_sprite()
 	_setup_attack_tell_particles()
 	_setup_attack_tell_label()
+	_setup_suspicion_label()
 	_randomize_personality()
 	
 	if not _hitbox.body_entered.is_connected(_on_hitbox_body_entered):
@@ -146,6 +155,7 @@ func _process(delta):
 	_forced_disengage_timer = max(0.0, _forced_disengage_timer - max(0.0, delta))
 	if _attack_tell_visible:
 		queue_redraw()
+	_update_suspicion_visual()
 
 	# Safety check for target
 	if target_body and not is_instance_valid(target_body):
@@ -157,30 +167,39 @@ func _process(delta):
 	# AI Logic
 	match current_state:
 		State.IDLE:
+			velocity = Vector2.ZERO
 			_play_anim("idle")
 			if target_body:
 				current_state = State.CHASE
 			else:
 				# Face nearest player if close
-				var nearest = null
-				var min_dist = 99999.0
-				var players = get_tree().get_nodes_in_group("player")
-				for p in players:
-					var d = global_position.distance_to(p.global_position)
-					if d < min_dist:
-						min_dist = d
-						nearest = p
-				
-				if nearest and min_dist < DETECT_RANGE:
-					var dir_to = (nearest.global_position - global_position).normalized()
-					if dir_to.x < 0:
-						_sprite.flip_h = true
-						_hitbox.scale.x = -1
-					else:
-						_sprite.flip_h = false
-						_hitbox.scale.x = 1
+				var nearest = _get_nearest_player()
+				if nearest:
+					var dir_to = nearest.global_position - global_position
+					if dir_to.length() < DETECT_RANGE:
+						_face_direction(dir_to)
 				
 				_try_proximity_aggro(delta)
+
+		State.SUSPICIOUS:
+			if target_body:
+				current_state = State.CHASE
+			else:
+				_try_proximity_aggro(delta)
+				if _proximity_aggro_timer <= 0.0:
+					current_state = State.IDLE
+				else:
+					var to_focus = _suspicion_last_known_pos - global_position
+					var arrive_distance_px = max(20.0, suspicion_arrive_distance_meters * PIXELS_PER_METER)
+					if to_focus.length() > arrive_distance_px:
+						var dir = to_focus.normalized()
+						velocity = dir * _speed * suspicion_move_speed_multiplier
+						move_and_slide()
+						_face_direction(dir)
+						_play_anim("walking")
+					else:
+						velocity = Vector2.ZERO
+						_play_anim("idle")
 		
 		State.CHASE:
 			if target_body:
@@ -204,14 +223,7 @@ func _process(delta):
 					var strafe = Vector2(-dir.y, dir.x) * sin(_strafe_timer * 2.5) * _strafe_offset.length()
 					velocity = dir * _speed + strafe
 					move_and_slide()
-					
-					if dir.x < 0: 
-						_sprite.flip_h = true
-						_hitbox.position.x = -hitbox_offset_x
-					else:
-						_sprite.flip_h = false
-						_hitbox.position.x = hitbox_offset_x
-					
+					_face_direction(dir)
 					_play_anim("walking")
 			else:
 				current_state = State.IDLE
@@ -224,26 +236,14 @@ func _process(delta):
 				var dir = (group_target_pos - global_position).normalized()
 				velocity = dir * _speed
 				move_and_slide()
-				
-				if dir.x < 0: 
-					_sprite.flip_h = true
-					_hitbox.position.x = -hitbox_offset_x
-				else:
-					_sprite.flip_h = false
-					_hitbox.position.x = hitbox_offset_x
-				
+				_face_direction(dir)
 				_play_anim("walking")
 			_try_proximity_aggro(delta)
 
 		State.ATTACK:
 			if target_body:
 				var dir_to_target = (target_body.global_position - global_position).normalized()
-				if dir_to_target.x < 0:
-					_sprite.flip_h = true
-					_hitbox.scale.x = -1
-				else:
-					_sprite.flip_h = false
-					_hitbox.scale.x = 1
+				_face_direction(dir_to_target)
 			
 			if _play_anim_once("attacking"):
 				_hitbox.monitoring = true
@@ -263,14 +263,30 @@ func _push_off_from_target(target_pos: Vector2):
 
 	velocity = away * _speed * 0.6
 	move_and_slide()
+	_face_direction(away)
+	_play_anim("walking")
 
-	if away.x < 0:
+func _face_direction(dir: Vector2):
+	if dir.x < 0:
 		_sprite.flip_h = true
 		_hitbox.position.x = -hitbox_offset_x
+		_hitbox.scale.x = -1
 	else:
 		_sprite.flip_h = false
 		_hitbox.position.x = hitbox_offset_x
-	_play_anim("walking")
+		_hitbox.scale.x = 1
+
+func _get_nearest_player() -> Node2D:
+	var nearest: Node2D = null
+	var min_dist = INF
+	for player in get_tree().get_nodes_in_group("player"):
+		if !is_instance_valid(player) or player.is_queued_for_deletion():
+			continue
+		var dist = global_position.distance_to(player.global_position)
+		if dist < min_dist:
+			min_dist = dist
+			nearest = player
+	return nearest
 
 func _on_anim_finished():
 	if current_state == State.ATTACK:
@@ -317,42 +333,63 @@ func on_ally_attacked(target):
 		# Delayed reaction
 		await get_tree().create_timer(randf_range(0.5, 1.5)).timeout
 		if is_instance_valid(self) and is_instance_valid(target) and !target_body and _forced_disengage_timer <= 0.0 and !_is_target_hidden(target):
+			_proximity_aggro_timer = 0.0
 			target_body = target
 			_start_attack_tell()
 			current_state = State.CHASE
 
 func _try_proximity_aggro(delta: float):
 	if !proximity_aggro_enabled:
-		_proximity_aggro_timer = 0.0
+		_clear_suspicion()
 		return
 	if target_body:
-		_proximity_aggro_timer = 0.0
+		_clear_suspicion()
 		return
 	if _forced_disengage_timer > 0.0:
-		_proximity_aggro_timer = 0.0
+		_decay_suspicion(delta, true)
 		return
 
 	var player = get_tree().get_first_node_in_group("player")
 	if !player or !is_instance_valid(player):
-		_proximity_aggro_timer = 0.0
+		_decay_suspicion(delta, true)
 		return
 	if _is_target_hidden(player):
-		_proximity_aggro_timer = 0.0
+		_decay_suspicion(delta, true)
 		return
 
 	var aggro_range_px = proximity_aggro_range_meters * PIXELS_PER_METER
-	if global_position.distance_to(player.global_position) > aggro_range_px:
-		_proximity_aggro_timer = 0.0
+	var suspicion_range_px = max(aggro_range_px, suspicion_range_meters * PIXELS_PER_METER)
+	var distance_to_player = global_position.distance_to(player.global_position)
+	if distance_to_player > suspicion_range_px:
+		_decay_suspicion(delta, false)
 		return
 
-	_proximity_aggro_timer += delta
+	var build_multiplier = 1.0 if distance_to_player <= aggro_range_px else 0.45
+	if !suspicion_enabled:
+		build_multiplier = 1.0
+	_suspicion_last_known_pos = player.global_position
+	_proximity_aggro_timer += delta * build_multiplier
+	_proximity_aggro_timer = min(_proximity_aggro_timer, proximity_aggro_linger_seconds)
+	if suspicion_enabled and _proximity_aggro_timer > 0.0 and (current_state == State.IDLE or current_state == State.JOIN_GROUP):
+		current_state = State.SUSPICIOUS
+	queue_redraw()
+
 	if _proximity_aggro_timer >= proximity_aggro_linger_seconds:
+		_clear_suspicion()
 		target_body = player
 		_start_attack_tell()
 		current_state = State.CHASE
-		_proximity_aggro_timer = 0.0
 
 func _draw():
+	if _proximity_aggro_timer > 0.01 and !_attack_tell_visible and current_state != State.DYING:
+		var center = Vector2(0, -50)
+		var radius = 16.0
+		var end_angle = -PI * 0.5 + TAU * clamp(_proximity_aggro_timer / max(0.01, proximity_aggro_linger_seconds), 0.0, 1.0)
+		var suspicion_color = Color(1.0, 0.86, 0.24, 0.95)
+		draw_arc(center, radius + 1.0, 0.0, TAU, 24, Color(1.0, 0.86, 0.24, 0.14), 4.0, true)
+		draw_arc(center, radius, -PI * 0.5, end_angle, 24, suspicion_color, 3.0, true)
+		draw_circle(center, 3.0, Color(1.0, 0.92, 0.45, 0.7))
+
 	if !_attack_tell_visible:
 		return
 
@@ -408,6 +445,31 @@ func _clear_attack_tell():
 	_attack_tell_visible = false
 	_attack_tell_progress = 0.0
 	queue_redraw()
+
+func _clear_suspicion():
+	_proximity_aggro_timer = 0.0
+	queue_redraw()
+
+func _decay_suspicion(delta: float, immediate: bool):
+	if immediate:
+		_clear_suspicion()
+		return
+	var decay_window = max(0.05, suspicion_decay_seconds)
+	_proximity_aggro_timer = max(0.0, _proximity_aggro_timer - delta * (proximity_aggro_linger_seconds / decay_window))
+	queue_redraw()
+
+func _update_suspicion_visual():
+	if !_suspicion_label:
+		return
+	var show_label = _proximity_aggro_timer > 0.01 and !_attack_tell_visible and current_state != State.DYING
+	_suspicion_label.visible = show_label
+	if !show_label:
+		return
+	var pulse = 0.92 + 0.12 * sin(Time.get_ticks_msec() / 140.0)
+	var progress = clamp(_proximity_aggro_timer / max(0.01, proximity_aggro_linger_seconds), 0.0, 1.0)
+	_suspicion_label.modulate = Color(1.0, 0.88 + 0.08 * progress, 0.30, 0.94)
+	_suspicion_label.scale = Vector2.ONE * pulse
+	_suspicion_label.position = Vector2(-10, -92 - 6.0 * progress)
 
 func _get_attack_tell_color() -> Color:
 	match opp_folder:
@@ -470,6 +532,21 @@ func _setup_attack_tell_label():
 	_attack_tell_label.add_theme_constant_override("shadow_outline_size", 8)
 	add_child(_attack_tell_label)
 
+func _setup_suspicion_label():
+	if _suspicion_label:
+		return
+	_suspicion_label = Label.new()
+	_suspicion_label.name = "SuspicionLabel"
+	_suspicion_label.text = "?"
+	_suspicion_label.visible = false
+	_suspicion_label.position = Vector2(-10, -92)
+	_suspicion_label.z_index = 49
+	_suspicion_label.add_theme_font_size_override("font_size", 24)
+	_suspicion_label.add_theme_color_override("font_color", Color(1.0, 0.88, 0.28, 1.0))
+	_suspicion_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
+	_suspicion_label.add_theme_constant_override("shadow_outline_size", 8)
+	add_child(_suspicion_label)
+
 func _show_attack_tell_label():
 	if !_attack_tell_label:
 		return
@@ -517,6 +594,7 @@ func die():
 
 func force_forget_player(player: Node2D, disengage_distance_px: float = 220.0):
 	_clear_attack_tell()
+	_clear_suspicion()
 	_hitbox.monitoring = false
 	target_body = null
 	_forced_disengage_timer = max(0.2, forced_disengage_cooldown_seconds)
