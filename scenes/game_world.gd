@@ -218,8 +218,8 @@ const DB_SILENT = -80.0
 @export var player_attack_volume_db: float = -4.0
 @export var friendly_attack_volume_db: float = -14.0
 @export var player_hit_volume_db: float = -8.0
-@export var enemy_death_ouch_volume_db: float = -17.5
-@export var rescue_laugh_volume_db: float = -14.0
+@export var enemy_death_ouch_volume_db: float = -21.0
+@export var rescue_laugh_volume_db: float = -19.0
 @export var enemy_music_blend_range_meters: float = 8.0
 @export var music_fade_speed: float = 3.0
 @export var sfx_fade_speed: float = 8.0
@@ -823,16 +823,19 @@ func _update_rescue_laugh_source():
 		_stop_rescue_laugh()
 		return
 	if _rescue_laugh_enemy.get("target_body") != _rescue_mission_target:
-		var replacement = _pick_rescue_laugh_enemy()
-		if replacement and replacement != _rescue_laugh_enemy:
-			_set_rescue_laugh_enemy(replacement)
-		elif replacement == null:
-			_stop_rescue_laugh()
-			return
+		_stop_rescue_laugh()
+		return
 	_rescue_laugh_player.global_position = _rescue_laugh_enemy.global_position
 	_rescue_laugh_player.volume_db = rescue_laugh_volume_db
 	if !_rescue_laugh_player.playing:
 		_rescue_laugh_player.play()
+
+func _play_enemy_death_ouch(enemy: Node2D):
+	if !is_instance_valid(enemy):
+		return
+	var enemy_family = String(enemy.get("opp_family")).to_lower()
+	var stream = _enemy_ouch_hard_stream if enemy_family == "orcs" else _enemy_ouch_soft_stream
+	_play_one_shot_2d(stream, enemy.global_position, enemy_death_ouch_volume_db)
 
 func _now_seconds() -> float:
 	return Time.get_ticks_msec() / 1000.0
@@ -1282,9 +1285,9 @@ func _get_level_background_source_id() -> int:
 		0:
 			return int(level_background_source_ids.get("green_grass", -1))
 		1:
-			return int(level_background_source_ids.get("brick", -1))
-		2:
 			return int(level_background_source_ids.get("dirt", -1))
+		2:
+			return int(level_background_source_ids.get("brick", -1))
 		_:
 			return -1
 
@@ -2569,6 +2572,7 @@ func _update_rescue_mission(delta: float):
 	if _rescue_mission_target and is_instance_valid(_rescue_mission_target):
 		_rescue_mission_timer = max(0.0, _rescue_mission_timer - max(0.0, delta))
 		_prune_rescue_mission_enemies()
+		_update_rescue_laugh_source()
 		if !_is_friendly_alive(_rescue_mission_target):
 			_fail_rescue_mission("Too slow. They were overrun.")
 			return
@@ -2615,6 +2619,7 @@ func _activate_rescue_mission(target: CharacterBody2D, spawn_attackers: bool, in
 
 	if !spawn_attackers:
 		_collect_existing_attackers_for_target(target)
+		_update_rescue_laugh_source()
 		_show_floating_text("SIDE MISSION: SAVE YOUR FRIEND", Color(1.0, 0.84, 0.42, 1.0))
 		return
 
@@ -2640,6 +2645,7 @@ func _activate_rescue_mission(target: CharacterBody2D, spawn_attackers: bool, in
 			enemy.set_target_body(target, true, false)
 		_rescue_mission_enemies.append(enemy)
 
+	_update_rescue_laugh_source()
 	_show_floating_text("SIDE MISSION: SAVE YOUR FRIEND", Color(1.0, 0.84, 0.42, 1.0))
 
 func _collect_existing_attackers_for_target(target: CharacterBody2D):
@@ -2684,6 +2690,7 @@ func _fail_rescue_mission(message: String):
 	_schedule_next_rescue_mission()
 
 func _clear_rescue_mission_state():
+	_stop_rescue_laugh()
 	_rescue_mission_target = null
 	_rescue_mission_enemies.clear()
 	_rescue_mission_timer = 0.0
@@ -3026,7 +3033,8 @@ func _update_combo_timer(delta: float):
 			if ui and ui.has_method("update_combo"):
 				ui.update_combo(0, 1)
 
-func _on_player_enemy_killed():
+func _on_player_enemy_killed(enemy: Node2D = null):
+	_play_enemy_death_ouch(enemy)
 	_enemies_killed += 1
 	_add_kill_score()
 	if _combo_count > _max_combo:
