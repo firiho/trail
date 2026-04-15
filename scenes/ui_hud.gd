@@ -64,6 +64,10 @@ func _get_custom_font() -> Font:
 		_custom_font = load("res://assets/fonts/PressStart2P-Regular.ttf")
 	return _custom_font
 
+func _get_start_logo_texture() -> Texture2D:
+	var sprite_data = CharacterCatalog.get_player_sprite_data("creatives", "player_2")
+	return sprite_data.get("preview_texture", null)
+
 func _ready():
 	_ensure_proximity_bar()
 	_layout_proximity_bar()
@@ -154,7 +158,7 @@ func _ensure_intro_menu():
 	_start_logo_rect.custom_minimum_size = Vector2(176, 188)
 	_start_logo_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_start_logo_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	_start_logo_rect.texture = load("res://assets/players/creatives/player_2/wizard_idle_6.png")
+	_start_logo_rect.texture = _get_start_logo_texture()
 	_start_logo_rect.modulate = Color(0.90, 0.96, 0.82, 0.92)
 	root.add_child(_start_logo_rect)
 
