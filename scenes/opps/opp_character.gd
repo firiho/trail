@@ -1,8 +1,10 @@
 extends CharacterBody2D
 
 static var _SPRITE_BUILD_CACHE := {}
+const CharacterCatalog = preload("res://scenes/character_catalog.gd")
 
 @export var opp_folder: String = "opp_1"
+@export var opp_family: String = "wraiths"
 @export var group_id: int = 0
 
 
@@ -12,6 +14,7 @@ const ATTACK_RANGE = 55.0
 const DETECT_RANGE = 400.0
 const PIXELS_PER_METER = 40.0
 const MIN_CHASE_SPACING = 30.0
+const ENEMY_TARGET_DISPLAY_HEIGHT = 108.0
 
 # Per-instance randomness (set in _ready)
 var _speed: float = BASE_SPEED
@@ -28,6 +31,7 @@ var _dodge_chance: float = 0.0
 @export var proximity_aggro_enabled: bool = true
 @export var proximity_aggro_range_meters: float = 5.0
 @export var proximity_aggro_linger_seconds: float = 1.0
+@export var friendly_aggro_enabled: bool = true
 @export_group("Suspicion")
 @export var suspicion_enabled: bool = true
 @export var suspicion_range_meters: float = 7.0
@@ -37,6 +41,11 @@ var _dodge_chance: float = 0.0
 @export_group("Attack Telegraph")
 @export var attack_tell_enabled: bool = true
 @export var attack_tell_duration_seconds: float = 0.35
+@export_group("Disengage")
+@export var chase_disengage_distance_meters: float = 100.0
+@export var chase_disengage_grace_seconds: float = 1.25
+@export var chase_disengage_offscreen_margin_px: float = 80.0
+@export var chase_disengage_suspicion_fraction: float = 0.58
 @export_group("Stealth")
 @export var forced_disengage_cooldown_seconds: float = 3.2
 
@@ -52,7 +61,11 @@ var health = 60
 @onready var _collision_shape: CollisionShape2D = $CollisionShape2D
 
 var _current_anim: String = ""
-var _loaded_anims: Array[String] = []
+var _loaded_anims: Array = []
+var _attack_animations: Array = []
+var _resolved_default_animation: String = ""
+var _active_attack_animation: String = ""
+var _last_attack_animation: String = ""
 var _proximity_aggro_timer: float = 0.0
 var _suspicion_last_known_pos: Vector2 = Vector2.ZERO
 var _attack_tell_progress: float = 0.0
@@ -63,6 +76,17 @@ var _attack_tell_label: Label = null
 var _attack_tell_label_tween: Tween = null
 var _forced_disengage_timer: float = 0.0
 var _suspicion_label: Label = null
+var _chase_disengage_timer: float = 0.0
+
+func set_opp_family(next_family: String):
+	var resolved_family = CharacterCatalog.resolve_enemy_family(next_family)
+	if resolved_family == "":
+		return
+	if opp_family == resolved_family and _sprite and _sprite.sprite_frames:
+		return
+	opp_family = resolved_family
+	if is_inside_tree():
+		_build_sprite()
 
 func _ready():
 	add_to_group("enemy")
@@ -98,47 +122,34 @@ func _randomize_personality():
 # func _setup_collision(): ... removed
 
 func _build_sprite():
-	var base = "res://assets/opps/" + opp_folder + "/"
-	var anims = ["idle", "walking", "attacking", "dying", "hurt", "taunt"]
-	_loaded_anims.clear()
+	var sprite_data = CharacterCatalog.get_enemy_sprite_data(opp_family, opp_folder)
+	if sprite_data.is_empty():
+		return
 
-	var sf: SpriteFrames = null
-	if _SPRITE_BUILD_CACHE.has(opp_folder):
-		var cached = _SPRITE_BUILD_CACHE[opp_folder]
-		sf = (cached["sprite_frames"] as SpriteFrames).duplicate(true)
-		_loaded_anims = cached["loaded_anims"].duplicate()
-	else:
-		var template_sf = SpriteFrames.new()
-		if template_sf.has_animation("default"): template_sf.remove_animation("default")
-		var built_anims: Array[String] = []
-		
-		for anim in anims:
-			var dir = base + anim + "/"
-			var frames = _load_frames(dir)
-			if frames.size() > 0:
-				template_sf.add_animation(anim)
-				template_sf.set_animation_loop(anim, true)
-				template_sf.set_animation_speed(anim, 15.0)
-				for t in frames:
-					template_sf.add_frame(anim, t)
-				built_anims.append(anim)
-		
-		_SPRITE_BUILD_CACHE[opp_folder] = {
-			"sprite_frames": template_sf,
-			"loaded_anims": built_anims.duplicate()
-		}
-		sf = template_sf.duplicate(true)
-		_loaded_anims = built_anims
-				
-	# _sprite = AnimatedSprite2D.new() # Already in scene
+	opp_family = String(sprite_data.get("family_id", opp_family))
+	_loaded_anims = (sprite_data.get("loaded_anims", []) as Array).duplicate()
+	_attack_animations = (sprite_data.get("attack_animations", []) as Array).duplicate()
+	_resolved_default_animation = String(sprite_data.get("default_animation", "idle"))
+	_current_anim = ""
+	_active_attack_animation = ""
+
+	var sf: SpriteFrames = sprite_data.get("sprite_frames", null)
+	if sf == null:
+		return
+
+	var default_anim = _get_default_animation_name()
+	var sample_anim = default_anim
+	if sample_anim == "" and !_loaded_anims.is_empty():
+		sample_anim = String(_loaded_anims[0])
+	var sample_tex = sf.get_frame_texture(sample_anim, 0) if sample_anim != "" and sf.has_animation(sample_anim) else null
+
 	_sprite.sprite_frames = sf
-	_sprite.scale = Vector2(0.25, 0.25)
+	_sprite.scale = _get_runtime_sprite_scale(sample_tex)
 	
 	# Offset sprite so its "position" is at its feet
 	if sprite_offset != Vector2.ZERO:
 		_sprite.offset = sprite_offset
 	else:
-		var sample_tex = sf.get_frame_texture("idle", 0)
 		if sample_tex:
 			_sprite.offset.y = -sample_tex.get_height() / 2.0
 	
@@ -147,8 +158,9 @@ func _build_sprite():
 	if not _sprite.animation_finished.is_connected(_on_anim_finished):
 		_sprite.animation_finished.connect(_on_anim_finished)
 	# add_child(_sprite)
-	_play_anim("idle")
-	_sprite.play("idle") # Force play
+	if default_anim != "":
+		_play_anim(default_anim)
+		_sprite.play(default_anim) # Force play
 
 func _process(delta):
 	if current_state == State.DYING: return
@@ -163,12 +175,16 @@ func _process(delta):
 		current_state = State.IDLE
 	elif target_body and _is_target_hidden(target_body):
 		force_forget_player(target_body, 140.0)
+	elif _should_disengage_from_target(delta):
+		_disengage_to_suspicion()
 	
 	# AI Logic
 	match current_state:
 		State.IDLE:
 			velocity = Vector2.ZERO
-			_play_anim("idle")
+			var idle_anim = _get_default_animation_name()
+			if idle_anim != "":
+				_play_anim(idle_anim)
 			if target_body:
 				current_state = State.CHASE
 			else:
@@ -215,6 +231,7 @@ func _process(delta):
 							velocity = Vector2.ZERO
 						else:
 							velocity = Vector2.ZERO
+							_active_attack_animation = _get_next_attack_animation()
 							current_state = State.ATTACK
 				else:
 					var dir = to_target.normalized()
@@ -245,7 +262,9 @@ func _process(delta):
 				var dir_to_target = (target_body.global_position - global_position).normalized()
 				_face_direction(dir_to_target)
 			
-			if _play_anim_once("attacking"):
+			if _active_attack_animation == "":
+				_active_attack_animation = _get_next_attack_animation()
+			if _active_attack_animation != "" and _play_anim_once(_active_attack_animation):
 				_hitbox.monitoring = true
 			# Wait for anim finish
 		
@@ -292,21 +311,25 @@ func _on_anim_finished():
 	if current_state == State.ATTACK:
 		_hitbox.monitoring = false
 		_clear_attack_tell()
+		_active_attack_animation = ""
 		_current_anim = "" # Reset so we can attack again immediately
 		# Random post-attack pause before re-engaging
 		_attack_pause = randf_range(0.0, 0.8)
 		current_state = State.CHASE # check range
 	elif current_state == State.HURT:
 		_clear_attack_tell()
+		_active_attack_animation = ""
 		current_state = State.IDLE # recover
 		if target_body: current_state = State.CHASE
 
 func _on_hitbox_body_entered(body):
+	if body.is_in_group("friendly_npc") and target_body != body:
+		return
 	if body.is_in_group("player") or body.is_in_group("friendly_npc"):
 		if body.has_method("take_damage"):
-			body.take_damage(7)
+			body.take_damage(7, self)
 
-func take_damage(amount):
+func take_damage(amount, attacker: Node2D = null):
 	if current_state == State.DYING: return
 	# Dodge chance — sometimes sidestep instead of taking full damage
 	if randf() < _dodge_chance and current_state != State.HURT:
@@ -319,7 +342,9 @@ func take_damage(amount):
 	_play_anim_once("hurt")
 	
 	# Alert group - DELAYED
-	get_tree().call_group("opp_group_" + str(group_id), "on_ally_attacked", get_tree().get_first_node_in_group("player")) 
+	if attacker == null or !is_instance_valid(attacker):
+		attacker = get_tree().get_first_node_in_group("player")
+	get_tree().call_group("opp_group_" + str(group_id), "on_ally_attacked", attacker) 
 	
 	if health <= 0:
 		die()
@@ -333,10 +358,7 @@ func on_ally_attacked(target):
 		# Delayed reaction
 		await get_tree().create_timer(randf_range(0.5, 1.5)).timeout
 		if is_instance_valid(self) and is_instance_valid(target) and !target_body and _forced_disengage_timer <= 0.0 and !_is_target_hidden(target):
-			_proximity_aggro_timer = 0.0
-			target_body = target
-			_start_attack_tell()
-			current_state = State.CHASE
+			set_target_body(target)
 
 func _try_proximity_aggro(delta: float):
 	if !proximity_aggro_enabled:
@@ -349,25 +371,25 @@ func _try_proximity_aggro(delta: float):
 		_decay_suspicion(delta, true)
 		return
 
-	var player = get_tree().get_first_node_in_group("player")
-	if !player or !is_instance_valid(player):
+	var aggro_range_px = proximity_aggro_range_meters * PIXELS_PER_METER
+	var suspicion_range_px = max(aggro_range_px, suspicion_range_meters * PIXELS_PER_METER)
+	var focus_target = _get_nearest_aggro_target(suspicion_range_px)
+	if !focus_target:
 		_decay_suspicion(delta, true)
 		return
-	if _is_target_hidden(player):
+	if _is_target_hidden(focus_target):
 		_decay_suspicion(delta, true)
 		return
 
-	var aggro_range_px = proximity_aggro_range_meters * PIXELS_PER_METER
-	var suspicion_range_px = max(aggro_range_px, suspicion_range_meters * PIXELS_PER_METER)
-	var distance_to_player = global_position.distance_to(player.global_position)
-	if distance_to_player > suspicion_range_px:
+	var distance_to_target = global_position.distance_to(focus_target.global_position)
+	if distance_to_target > suspicion_range_px:
 		_decay_suspicion(delta, false)
 		return
 
-	var build_multiplier = 1.0 if distance_to_player <= aggro_range_px else 0.45
+	var build_multiplier = 1.0 if distance_to_target <= aggro_range_px else 0.45
 	if !suspicion_enabled:
 		build_multiplier = 1.0
-	_suspicion_last_known_pos = player.global_position
+	_suspicion_last_known_pos = focus_target.global_position
 	_proximity_aggro_timer += delta * build_multiplier
 	_proximity_aggro_timer = min(_proximity_aggro_timer, proximity_aggro_linger_seconds)
 	if suspicion_enabled and _proximity_aggro_timer > 0.0 and (current_state == State.IDLE or current_state == State.JOIN_GROUP):
@@ -375,10 +397,7 @@ func _try_proximity_aggro(delta: float):
 	queue_redraw()
 
 	if _proximity_aggro_timer >= proximity_aggro_linger_seconds:
-		_clear_suspicion()
-		target_body = player
-		_start_attack_tell()
-		current_state = State.CHASE
+		set_target_body(focus_target)
 
 func _draw():
 	if _proximity_aggro_timer > 0.01 and !_attack_tell_visible and current_state != State.DYING:
@@ -449,6 +468,98 @@ func _clear_attack_tell():
 func _clear_suspicion():
 	_proximity_aggro_timer = 0.0
 	queue_redraw()
+
+func _get_nearest_aggro_target(max_distance_px: float = INF) -> CharacterBody2D:
+	var nearest: CharacterBody2D = null
+	var best_score = INF
+	for player in get_tree().get_nodes_in_group("player"):
+		if !is_instance_valid(player) or player.is_queued_for_deletion():
+			continue
+		if _is_target_hidden(player):
+			continue
+		var dist = global_position.distance_to(player.global_position)
+		if dist > max_distance_px:
+			continue
+		var score = dist * 0.82
+		if score < best_score:
+			best_score = score
+			nearest = player
+
+	if !friendly_aggro_enabled:
+		return nearest
+
+	for friendly in get_tree().get_nodes_in_group("friendly_npc"):
+		if !is_instance_valid(friendly) or friendly.is_queued_for_deletion():
+			continue
+		var dist = global_position.distance_to(friendly.global_position)
+		if dist > max_distance_px:
+			continue
+		if dist < best_score:
+			best_score = dist
+			nearest = friendly
+
+	return nearest
+
+func set_target_body(next_target: CharacterBody2D, show_attack_tell: bool = true, report_friendly_target: bool = true):
+	if !next_target or !is_instance_valid(next_target):
+		return
+	if _is_target_hidden(next_target):
+		return
+	var resolved_target = next_target
+	if report_friendly_target and next_target.is_in_group("friendly_npc"):
+		var world = get_tree().current_scene
+		if world and world.has_method("resolve_friendly_attack_target"):
+			var redirected = world.resolve_friendly_attack_target(next_target, self)
+			if redirected and is_instance_valid(redirected):
+				resolved_target = redirected
+	_clear_suspicion()
+	target_body = resolved_target
+	if show_attack_tell:
+		_start_attack_tell()
+	current_state = State.CHASE
+
+func _should_disengage_from_target(delta: float) -> bool:
+	if !target_body or !is_instance_valid(target_body):
+		_chase_disengage_timer = 0.0
+		return false
+	if current_state != State.CHASE and current_state != State.ATTACK:
+		_chase_disengage_timer = 0.0
+		return false
+
+	var disengage_distance_px = max(0.0, chase_disengage_distance_meters) * PIXELS_PER_METER
+	var too_far = disengage_distance_px > 0.0 and global_position.distance_to(target_body.global_position) >= disengage_distance_px
+	var offscreen = _is_far_enough_offscreen()
+	if !too_far and !offscreen:
+		_chase_disengage_timer = 0.0
+		return false
+
+	_chase_disengage_timer += max(0.0, delta)
+	return _chase_disengage_timer >= max(0.05, chase_disengage_grace_seconds)
+
+func _disengage_to_suspicion():
+	_chase_disengage_timer = 0.0
+	_clear_attack_tell()
+	_hitbox.monitoring = false
+	_active_attack_animation = ""
+	target_body = null
+	velocity = Vector2.ZERO
+	_suspicion_last_known_pos = global_position
+
+	if suspicion_enabled:
+		var suspicion_floor = proximity_aggro_linger_seconds * clamp(chase_disengage_suspicion_fraction, 0.05, 1.0)
+		_proximity_aggro_timer = max(_proximity_aggro_timer, suspicion_floor)
+		current_state = State.SUSPICIOUS
+	else:
+		_clear_suspicion()
+		current_state = State.IDLE
+
+func _is_far_enough_offscreen() -> bool:
+	var viewport = get_viewport()
+	if viewport == null:
+		return false
+	var screen_pos = get_global_transform_with_canvas().origin
+	var screen_rect = viewport.get_visible_rect().grow(chase_disengage_offscreen_margin_px)
+	return !screen_rect.has_point(screen_pos)
 
 func _decay_suspicion(delta: float, immediate: bool):
 	if immediate:
@@ -650,6 +761,35 @@ func _play_anim_once(anim) -> bool:
 		_current_anim = anim
 		return true
 	return false
+
+func _get_default_animation_name() -> String:
+	if _resolved_default_animation != "" and _loaded_anims.has(_resolved_default_animation):
+		return _resolved_default_animation
+	if _loaded_anims.has("idle"):
+		return "idle"
+	return "" if _loaded_anims.is_empty() else String(_loaded_anims[0])
+
+func _get_next_attack_animation() -> String:
+	if _attack_animations.is_empty():
+		if _loaded_anims.has("attacking"):
+			return "attacking"
+		return ""
+
+	if _attack_animations.size() == 1:
+		_last_attack_animation = String(_attack_animations[0])
+		return _last_attack_animation
+
+	var last_idx = _attack_animations.find(_last_attack_animation)
+	var next_idx = 0 if last_idx == -1 else (last_idx + 1) % _attack_animations.size()
+	_last_attack_animation = String(_attack_animations[next_idx])
+	return _last_attack_animation
+
+func _get_runtime_sprite_scale(sample_tex: Texture2D) -> Vector2:
+	if sample_tex == null:
+		return Vector2.ONE
+	var tex_height = max(1.0, float(sample_tex.get_height()))
+	var uniform_scale = ENEMY_TARGET_DISPLAY_HEIGHT / tex_height
+	return Vector2.ONE * uniform_scale
 
 func _load_frames(dir_path: String) -> Array:
 	var result = []

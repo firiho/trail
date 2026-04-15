@@ -12,6 +12,9 @@ static var _persisted_play_start_time: float = -1.0
 static var _max_unlocked_level: int = 1
 static var _go_to_level_select_after_reload: bool = false
 static var _has_persisted_run_stats: bool = false
+static var _persisted_player_family: String = "warriors"
+static var _persisted_player_member: String = "player_1"
+static var _persisted_enemy_family: String = "wraiths"
 
 const TILE_PX = 32
 const CHUNK_SIZE = 32
@@ -31,6 +34,9 @@ var Player3Scene = preload("res://scenes/players/player_3.tscn")
 var generated_chunks = {}
 var player_ref: Node2D = null
 var next_group_id = 1
+var _selected_player_family: String = _persisted_player_family
+var _selected_player_member: String = _persisted_player_member
+var _selected_enemy_family: String = _persisted_enemy_family
 
 const PIXELS_PER_METER = 40.0
 @export var trail_spawn_target_proximity_meters: float = 3.0
@@ -39,6 +45,16 @@ const PIXELS_PER_METER = 40.0
 @export var help_call_cluster_radius_meters: float = 3.0
 @export var transformed_spawn_distance_from_player_meters: float = 1.0
 @export var transformed_spawn_jitter_meters: float = 0.35
+@export_group("Rescue Missions")
+@export var rescue_missions_enabled: bool = true
+@export var rescue_mission_min_delay_seconds: float = 18.0
+@export var rescue_mission_max_delay_seconds: float = 34.0
+@export var rescue_mission_timeout_seconds: float = 24.0
+@export var rescue_mission_min_player_distance_meters: float = 8.0
+@export var rescue_mission_spawn_radius_meters: float = 2.5
+@export var rescue_mission_enemy_count: int = 3
+@export var rescue_mission_clear_radius_meters: float = 5.0
+@export var rescue_mission_success_score: int = 150
 
 @export_group("Level Layout")
 @export var use_structured_level_layout: bool = true
@@ -148,6 +164,9 @@ const PIXELS_PER_METER = 40.0
 @export var level1_apple_spawn_start_meter: float = 20.0
 @export var level1_apple_spawn_end_meter: float = 180.0
 @export var level1_pickup_side_range_meters: float = 1.5
+@export var level1_coin_enemy_territory_ratio: float = 0.72
+@export var level1_coin_enemy_cluster_radius_meters: float = 1.75
+@export var level1_coin_enemy_min_spacing_meters: float = 1.15
 @export var pickup_collect_radius_meters: float = 1.2
 @export var coin_score_value: int = 50
 @export var apple_heal_amount: int = 25
@@ -199,6 +218,8 @@ const DB_SILENT = -80.0
 @export var player_attack_volume_db: float = -4.0
 @export var friendly_attack_volume_db: float = -14.0
 @export var player_hit_volume_db: float = -8.0
+@export var enemy_death_ouch_volume_db: float = -17.5
+@export var rescue_laugh_volume_db: float = -14.0
 @export var enemy_music_blend_range_meters: float = 8.0
 @export var music_fade_speed: float = 3.0
 @export var sfx_fade_speed: float = 8.0
@@ -218,6 +239,9 @@ var _start_click_stream = preload("res://assets/audio/game-start.wav")
 var _game_over_stream = preload("res://assets/audio/game-end.wav")
 var _player_sword_stream = preload("res://assets/audio/player-sword.mp3")
 var _enemy_hits_stream = preload("res://assets/audio/enemy-hits.mp3")
+var _enemy_ouch_soft_stream = preload("res://assets/audio/ouch_soft.mp3")
+var _enemy_ouch_hard_stream = preload("res://assets/audio/ouch_hard.mp3")
+var _rescue_laugh_stream = preload("res://assets/audio/hehehehe.mp3")
 var _path_fill_texture = preload("res://assets/art/objects/green grass.png")
 var _path_outline_texture = preload("res://assets/art/objects/dirt.png")
 var _path_goal_texture = preload("res://assets/art/objects/camp/2.png")
@@ -280,9 +304,21 @@ var _play_start_time: float = 0.0
 var _compass_layer: CanvasLayer = null
 var _compass_arrow: Control = null
 var _compass_label: Label = null
+var _rescue_compass_arrow: Control = null
+var _rescue_compass_label: Label = null
+var _rescue_status_label: Label = null
+var _rescue_compass_angle_current: float = 0.0
+var _rescue_mission_target: CharacterBody2D = null
+var _rescue_mission_enemies: Array = []
+var _rescue_mission_timer: float = 0.0
+var _rescue_mission_next_time: float = -1.0
+var _rescue_laugh_player: AudioStreamPlayer2D = null
+var _rescue_laugh_enemy: Node2D = null
 
 # Asset References
 var tile_source_ids: Array[int] = []
+var tile_source_ids_by_name := {}
+var level_background_source_ids := {}
 var tree_textures: Array = []
 var bush_textures: Array = []
 var stone_textures: Array = []
@@ -327,19 +363,23 @@ func _ready():
 	_update_chunks()
 	
 	if ui:
-		if player_ref and player_ref.has_signal("health_changed"):
-			player_ref.health_changed.connect(ui.update_health)
-			player_ref.died.connect(_on_player_died)
-			if player_ref.has_signal("enemy_killed"):
-				player_ref.enemy_killed.connect(_on_player_enemy_killed)
-			# Init health
-			ui.update_health(player_ref.health, 100)
+		_connect_main_player_ui(player_ref)
 		if player_ref and player_ref.has_signal("idle_timer_changed"):
 			pass # Idle timer disabled — no connection needed
 		
 		# Connect level select / button signals
 		if ui.has_signal("level_selected"):
 			ui.level_selected.connect(_on_ui_level_selected)
+		if ui.has_signal("player_family_selected"):
+			ui.player_family_selected.connect(_on_ui_player_family_selected)
+		if ui.has_signal("player_member_selected"):
+			ui.player_member_selected.connect(_on_ui_player_member_selected)
+		if ui.has_signal("enemy_family_selected"):
+			ui.enemy_family_selected.connect(_on_ui_enemy_family_selected)
+		if ui.has_signal("start_requested"):
+			ui.start_requested.connect(start_game)
+		if ui.has_signal("level_select_requested"):
+			ui.level_select_requested.connect(_show_level_select)
 		if ui.has_signal("retry_pressed"):
 			ui.retry_pressed.connect(_on_ui_retry)
 		if ui.has_signal("next_level_pressed"):
@@ -359,6 +399,7 @@ func _ready():
 			if ui.has_method("show_level_banner"):
 				ui.show_level_banner(current_level_id)
 			if _is_level_one_layout_active():
+				_schedule_next_rescue_mission()
 				if current_level_id == 1:
 					_show_floating_text("Zzzzzzz, take me to my bush", Color(0.9, 1.0, 0.9, 1.0))
 				else:
@@ -367,6 +408,8 @@ func _ready():
 			_go_to_level_select_after_reload = false
 			_show_level_select()
 		else:
+			if ui.has_method("configure_loadout_selection"):
+				ui.configure_loadout_selection(_selected_player_family, _selected_enemy_family, _selected_player_member)
 			ui.show_start_screen()
 		
 	if game_state != PLAYING and player_ref and player_ref.has_method("set_input_enabled"):
@@ -375,9 +418,18 @@ func _ready():
 	_refresh_audio_state(true)
 
 func _input(event):
-	if event.is_action_pressed("attack"):
-		if game_state == START:
-			_show_level_select()
+	if game_state == START:
+		if event is InputEventKey and event.is_action_pressed("attack") and !event.echo and ui:
+			if ui.has_method("is_intro_screen_visible") and ui.is_intro_screen_visible():
+				if ui.has_method("show_loadout_screen"):
+					ui.show_loadout_screen()
+				return
+			if ui.has_method("is_instructions_screen_visible") and ui.is_instructions_screen_visible():
+				ui.show_start_screen()
+				return
+			if event is InputEventKey and ui.has_method("is_loadout_screen_visible") and ui.is_loadout_screen_visible():
+				start_game()
+				return
 	if event.is_action_pressed("help") and game_state == PLAYING:
 		_last_help_call_time = _now_seconds()
 		_call_for_help()
@@ -410,6 +462,7 @@ func start_game():
 			_show_floating_text("Zzzzzzz, take me to my bush", Color(0.9, 1.0, 0.9, 1.0))
 		else:
 			_show_floating_text("Level %d — Find the bush! (%dm away)" % [current_level_id, int(level1_path_length_meters)], Color(0.7, 1.0, 0.85, 1.0))
+	_schedule_next_rescue_mission()
 	_refresh_audio_state()
 
 func restart_game():
@@ -443,13 +496,15 @@ func _on_player_died():
 func _process(delta):
 	if is_instance_valid(player_ref):
 		_update_chunks()
-		_process_trail_transformation()
+		# Disabled for now: proximity-based friend/enemy spawning near nearby entities.
+		# _process_trail_transformation()
 		_collect_nearby_pickups()
 		_update_player_hiding(delta)
 		_update_objective_payload(delta)
 		_update_context_help_hint()
 		_update_level_goal_shield_state(delta)
 		_check_level_one_goal_reached()
+		_update_rescue_mission(delta)
 		_update_compass()
 		
 		# Update UI with proximity to nearest group
@@ -510,6 +565,28 @@ func _do_next_level_reload():
 # LEVEL SELECT / NAVIGATION HANDLERS
 # =====================================================================
 
+func _on_ui_player_family_selected(family_id: String):
+	if family_id == "":
+		return
+	_selected_player_family = family_id
+	_persisted_player_family = family_id
+	_apply_player_family_selection()
+
+func _on_ui_player_member_selected(member_id: String):
+	var resolved_member = _resolve_player_member_id(member_id)
+	if resolved_member == "":
+		return
+	_selected_player_member = resolved_member
+	_persisted_player_member = resolved_member
+	_apply_player_member_selection()
+
+func _on_ui_enemy_family_selected(family_id: String):
+	if family_id == "":
+		return
+	_selected_enemy_family = family_id
+	_persisted_enemy_family = family_id
+	_apply_enemy_family_selection()
+
 func _show_level_select():
 	game_state = LEVEL_SELECT
 	_clock_should_play = false
@@ -566,6 +643,24 @@ func _on_ui_back_to_levels():
 	_go_to_level_select_after_reload = true
 	_auto_start_after_reload = false
 	get_tree().reload_current_scene()
+
+func _apply_player_family_selection():
+	for player in get_tree().get_nodes_in_group("player"):
+		if is_instance_valid(player) and player.has_method("set_player_family"):
+			player.set_player_family(_selected_player_family)
+	for friendly in get_tree().get_nodes_in_group("friendly_npc"):
+		if is_instance_valid(friendly) and friendly.has_method("set_player_family"):
+			friendly.set_player_family(_selected_player_family)
+
+func _apply_player_member_selection():
+	if !is_instance_valid(player_ref):
+		return
+	_swap_main_player_member(_selected_player_member)
+
+func _apply_enemy_family_selection():
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(enemy) and enemy.has_method("set_opp_family"):
+			enemy.set_opp_family(_selected_enemy_family)
 
 # =====================================================================
 # AUDIO
@@ -658,6 +753,86 @@ func _play_one_shot_2d(stream: AudioStream, pos: Vector2, volume_db: float):
 	add_child(p)
 	p.finished.connect(p.queue_free)
 	p.play()
+
+func _ensure_rescue_laugh_player():
+	if _rescue_laugh_player and is_instance_valid(_rescue_laugh_player):
+		return
+	if !_rescue_laugh_stream:
+		return
+	_rescue_laugh_player = AudioStreamPlayer2D.new()
+	_rescue_laugh_player.name = "RescueLaughPlayer"
+	var stream = _rescue_laugh_stream.duplicate()
+	if stream is AudioStreamMP3:
+		stream.loop = true
+	_rescue_laugh_player.stream = stream
+	_rescue_laugh_player.volume_db = rescue_laugh_volume_db
+	_rescue_laugh_player.max_distance = 2200.0
+	_rescue_laugh_player.attenuation = 1.2
+	add_child(_rescue_laugh_player)
+
+func _stop_rescue_laugh():
+	_rescue_laugh_enemy = null
+	if _rescue_laugh_player and is_instance_valid(_rescue_laugh_player):
+		_rescue_laugh_player.stop()
+
+func _set_rescue_laugh_enemy(enemy: Node2D):
+	if enemy and !is_instance_valid(enemy):
+		enemy = null
+	_rescue_laugh_enemy = enemy
+	if _rescue_laugh_enemy == null:
+		_stop_rescue_laugh()
+		return
+	_ensure_rescue_laugh_player()
+	if !_rescue_laugh_player or !is_instance_valid(_rescue_laugh_player):
+		return
+	_rescue_laugh_player.global_position = _rescue_laugh_enemy.global_position
+	_rescue_laugh_player.volume_db = rescue_laugh_volume_db
+	if !_rescue_laugh_player.playing:
+		_rescue_laugh_player.play()
+
+func _pick_rescue_laugh_enemy() -> Node2D:
+	if !_is_friendly_alive(_rescue_mission_target):
+		return null
+	var best_enemy: Node2D = null
+	var best_dist := INF
+	for enemy in _rescue_mission_enemies:
+		if !is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		var dist = enemy.global_position.distance_to(_rescue_mission_target.global_position)
+		if enemy.get("target_body") != _rescue_mission_target:
+			dist += 180.0
+		if dist < best_dist:
+			best_dist = dist
+			best_enemy = enemy
+	return best_enemy
+
+func _update_rescue_laugh_source():
+	if _rescue_laugh_enemy == null:
+		_set_rescue_laugh_enemy(_pick_rescue_laugh_enemy())
+	if !_rescue_laugh_player or !is_instance_valid(_rescue_laugh_player):
+		_ensure_rescue_laugh_player()
+	if !_rescue_laugh_player or !is_instance_valid(_rescue_laugh_player):
+		return
+	if _rescue_laugh_enemy == null:
+		_rescue_laugh_player.stop()
+		return
+	if !is_instance_valid(_rescue_laugh_enemy) or _rescue_laugh_enemy.is_queued_for_deletion():
+		_stop_rescue_laugh()
+		return
+	if int(_rescue_laugh_enemy.get("health")) <= 0:
+		_stop_rescue_laugh()
+		return
+	if _rescue_laugh_enemy.get("target_body") != _rescue_mission_target:
+		var replacement = _pick_rescue_laugh_enemy()
+		if replacement and replacement != _rescue_laugh_enemy:
+			_set_rescue_laugh_enemy(replacement)
+		elif replacement == null:
+			_stop_rescue_laugh()
+			return
+	_rescue_laugh_player.global_position = _rescue_laugh_enemy.global_position
+	_rescue_laugh_player.volume_db = rescue_laugh_volume_db
+	if !_rescue_laugh_player.playing:
+		_rescue_laugh_player.play()
 
 func _now_seconds() -> float:
 	return Time.get_ticks_msec() / 1000.0
@@ -828,6 +1003,21 @@ func _register_audio_hooks_for_player(player: Node):
 		if !player.is_connected("idle_clock_active_changed", idle_cb):
 			player.connect("idle_clock_active_changed", idle_cb)
 
+func _register_friendly_character(friendly: Node):
+	if !friendly or !is_instance_valid(friendly):
+		return
+	_register_audio_hooks_for_player(friendly)
+	if friendly.has_signal("died"):
+		var died_cb = Callable(self, "_on_friendly_died").bind(friendly)
+		if !friendly.is_connected("died", died_cb):
+			friendly.connect("died", died_cb)
+
+func _on_friendly_died(friendly: Node2D):
+	if !is_instance_valid(friendly):
+		return
+	if friendly == _rescue_mission_target:
+		_fail_rescue_mission("Too slow. They were overrun.")
+
 func _on_player_attack_started(is_controllable_attack: bool, source_player: Node2D):
 	if !is_instance_valid(source_player):
 		return
@@ -947,6 +1137,25 @@ func _setup_tilemap():
 			source.create_tile(Vector2i(0, 0))
 			tile_set.add_source(source, i)
 			tile_source_ids.append(i)
+			tile_source_ids_by_name[paths[i].get_file().trim_suffix(".png")] = i
+
+	var next_source_id = paths.size()
+	var level_backgrounds = {
+		"green_grass": "res://assets/art/objects/green grass.png",
+		"brick": "res://assets/art/objects/brick.png",
+		"dirt": "res://assets/art/objects/dirt.png"
+	}
+	for background_key in level_backgrounds.keys():
+		var tex = _load_resized_tile_texture(level_backgrounds[background_key])
+		if tex == null:
+			continue
+		var source = TileSetAtlasSource.new()
+		source.texture = tex
+		source.texture_region_size = Vector2i(TILE_PX, TILE_PX)
+		source.create_tile(Vector2i(0, 0))
+		tile_set.add_source(source, next_source_id)
+		level_background_source_ids[background_key] = next_source_id
+		next_source_id += 1
 
 # =====================================================================
 # CHUNK GENERATION (Infinite)
@@ -978,9 +1187,8 @@ func _generate_chunk(chunk_coords: Vector2i):
 		for ly in range(CHUNK_SIZE):
 			var tx = start_tx + lx
 			var ty = start_ty + ly
-			var seed_val = (tx * 73856093) ^ (ty * 19349663)
-			var idx = abs(seed_val % tile_source_ids.size())
-			tile_map.set_cell(0, Vector2i(tx, ty), tile_source_ids[idx], Vector2i(0, 0))
+			var tile_source_id = _get_background_tile_source_id(tx, ty)
+			tile_map.set_cell(0, Vector2i(tx, ty), tile_source_id, Vector2i(0, 0))
 
 	if _is_level_one_layout_active() and level1_disable_chunk_ambient_objects:
 		return
@@ -1048,10 +1256,44 @@ func _generate_chunk(chunk_coords: Vector2i):
 			
 		# G. Friendly Players (Clusters) - 20% chance
 		if rng.randf() < 0.2:
-			var friends = [Player2Scene, Player3Scene]
+			var friends = _get_support_player_scenes()
 			var scn = friends[rng.randi() % friends.size()]
 			var pos = _rand_pos_in_chunk(chunk_coords, rng)
 			_spawn_friendly_cluster(scn, pos)
+
+func _get_background_tile_source_id(tx: int, ty: int) -> int:
+	var level_background_id = _get_level_background_source_id()
+	if level_background_id != -1:
+		return level_background_id
+
+	if tile_source_ids.is_empty():
+		return -1
+
+	var seed_val = (tx * 73856093) ^ (ty * 19349663)
+	var idx = abs(seed_val % tile_source_ids.size())
+	return int(tile_source_ids[idx])
+
+func _get_level_background_source_id() -> int:
+	if level_background_source_ids.is_empty():
+		return -1
+
+	var cycle_idx = posmod(current_level_id - 1, 3)
+	match cycle_idx:
+		0:
+			return int(level_background_source_ids.get("green_grass", -1))
+		1:
+			return int(level_background_source_ids.get("brick", -1))
+		2:
+			return int(level_background_source_ids.get("dirt", -1))
+		_:
+			return -1
+
+func _load_resized_tile_texture(path: String) -> Texture2D:
+	var image = Image.load_from_file(path)
+	if image == null or image.is_empty():
+		return null
+	image.resize(TILE_PX, TILE_PX, Image.INTERPOLATE_LANCZOS)
+	return ImageTexture.create_from_image(image)
 
 func _spawn_sprite(parent, texture, pos, add_collision: bool = false):
 	if add_collision:
@@ -1110,24 +1352,124 @@ func _rand_pos_in_chunk(coords: Vector2i, rng: RandomNumberGenerator) -> Vector2
 		rng.randf_range(min_y, min_y + CHUNK_PX)
 	)
 
+func _resolve_player_member_id(member_id: String) -> String:
+	match member_id:
+		"player_2", "player_3":
+			return member_id
+		_:
+			return "player_1"
+
+func _get_player_scene_for_member(member_id: String):
+	match _resolve_player_member_id(member_id):
+		"player_2":
+			return Player2Scene
+		"player_3":
+			return Player3Scene
+		_:
+			return Player1Scene
+
+func _instantiate_main_player(member_id: String) -> CharacterBody2D:
+	var scene = _get_player_scene_for_member(member_id)
+	var player = scene.instantiate()
+	player.player_folder = _resolve_player_member_id(member_id)
+	return player
+
+func _get_support_player_scenes() -> Array:
+	var scene_pairs = [
+		{"id": "player_1", "scene": Player1Scene},
+		{"id": "player_2", "scene": Player2Scene},
+		{"id": "player_3", "scene": Player3Scene}
+	]
+	var result: Array = []
+	for pair in scene_pairs:
+		if String(pair.get("id", "")) == _resolve_player_member_id(_selected_player_member):
+			continue
+		result.append(pair.get("scene"))
+	if result.is_empty():
+		result.append(_get_player_scene_for_member(_selected_player_member))
+	return result
+
+func _attach_camera_to_player(player: Node2D):
+	var cam = _cam_ref if is_instance_valid(_cam_ref) else get_node_or_null("Camera2D") as Camera2D
+	if !is_instance_valid(cam) or !is_instance_valid(player):
+		return
+	cam.reparent(player)
+	cam.position = Vector2.ZERO
+	cam.enabled = true
+	cam.make_current()
+	_cam_ref = cam
+
+func _connect_main_player_ui(player: Node):
+	if !ui or !player or !is_instance_valid(player):
+		return
+	if player.has_signal("health_changed"):
+		var health_cb = Callable(ui, "update_health")
+		if !player.is_connected("health_changed", health_cb):
+			player.connect("health_changed", health_cb)
+		var died_cb = Callable(self, "_on_player_died")
+		if player.has_signal("died") and !player.is_connected("died", died_cb):
+			player.connect("died", died_cb)
+		if player.has_signal("enemy_killed"):
+			var killed_cb = Callable(self, "_on_player_enemy_killed")
+			if !player.is_connected("enemy_killed", killed_cb):
+				player.connect("enemy_killed", killed_cb)
+		ui.update_health(int(player.get("health")), 100)
+
+func _transfer_objective_payload_to_player(next_player: Node2D):
+	if !_objective_payload or !is_instance_valid(_objective_payload):
+		_attach_level_one_objective_to_player(next_player)
+		return
+	var payload_parent = _objective_payload.get_parent()
+	var payload_global_pos = _objective_payload.global_position
+	var payload_scale = _objective_payload.scale
+	var payload_flip = _objective_payload.flip_h
+	if payload_parent:
+		payload_parent.remove_child(_objective_payload)
+	next_player.add_child(_objective_payload)
+	_objective_payload.global_position = payload_global_pos
+	_objective_payload.scale = payload_scale
+	_objective_payload.flip_h = payload_flip
+	_objective_payload_owner = next_player
+	_objective_last_owner_flip_set = false
+
+func _finalize_main_player_setup(player: CharacterBody2D, attach_objective: bool):
+	player_ref = player
+	_selected_player_member = _resolve_player_member_id(String(player.get("player_folder")))
+	_persisted_player_member = _selected_player_member
+	_register_audio_hooks_for_player(player)
+	_attach_camera_to_player(player)
+	if attach_objective:
+		_transfer_objective_payload_to_player(player)
+	_connect_main_player_ui(player)
+
+func _swap_main_player_member(member_id: String):
+	if !is_instance_valid(player_ref):
+		return
+	var resolved_member = _resolve_player_member_id(member_id)
+	if String(player_ref.get("player_folder")) == resolved_member:
+		return
+	var old_player = player_ref
+	var next_player = _instantiate_main_player(resolved_member)
+	next_player.player_family = _selected_player_family
+	next_player.position = old_player.global_position
+	next_player.is_controllable = true
+	next_player.health = old_player.health
+	$WorldContainer.add_child(next_player)
+	_finalize_main_player_setup(next_player, true)
+	if next_player.has_method("set_input_enabled"):
+		next_player.set_input_enabled(game_state == PLAYING)
+	old_player.queue_free()
+
 # =====================================================================
 # ENTITIES & CLUSTERS
 # =====================================================================
 func _place_fixed_entities():
-	# Player 1
-	var p1 = Player1Scene.instantiate()
+	var p1 = _instantiate_main_player(_selected_player_member)
+	p1.player_family = _selected_player_family
 	p1.position = level1_path_origin if _is_level_one_layout_active() else Vector2.ZERO
 	p1.is_controllable = true
 	$WorldContainer.add_child(p1)
-	_register_audio_hooks_for_player(p1)
-	_attach_level_one_objective_to_player(p1)
-	player_ref = p1
-	
-	var cam = $Camera2D
-	if cam:
-		cam.reparent(p1)
-		cam.position = Vector2.ZERO
-		_cam_ref = cam
+	_finalize_main_player_setup(p1, true)
 
 	if _is_level_one_layout_active():
 		_build_level_one_path_layout()
@@ -1800,7 +2142,7 @@ func _spawn_level_one_friendly_layout():
 		level1_friendly_off_path_min_side_meters * PIXELS_PER_METER,
 		level1_enemy_off_path_min_side_meters * PIXELS_PER_METER
 	)
-	var friendly_scenes = [Player2Scene, Player3Scene]
+	var friendly_scenes = _get_support_player_scenes()
 	var rng = RandomNumberGenerator.new()
 	rng.randomize()
 
@@ -1945,6 +2287,7 @@ func _spawn_opp_cluster(scene, center_pos, gid: int):
 	var offsets = [Vector2(0,0), Vector2(60, 40), Vector2(-60, 40)]
 	for off in offsets:
 		var opp = scene.instantiate()
+		opp.opp_family = _selected_enemy_family
 		opp.position = center_pos + off
 		opp.group_id = gid
 		$WorldContainer.add_child(opp)
@@ -1953,10 +2296,11 @@ func _spawn_friendly_cluster(scene, center_pos):
 	var offsets = [Vector2(0,0), Vector2(50, 0), Vector2(-50, 0)]
 	for off in offsets:
 		var p = scene.instantiate()
+		p.player_family = _selected_player_family
 		p.position = center_pos + off
 		p.is_controllable = false # Force passive
 		$WorldContainer.add_child(p)
-		_register_audio_hooks_for_player(p)
+		_register_friendly_character(p)
 
 # =====================================================================
 # TRAIL TRANSFORMATION
@@ -2170,6 +2514,180 @@ func _get_nearest_in_group(pos: Vector2, group_name: String) -> Node2D:
 			nearest = n
 	return nearest
 
+func _schedule_next_rescue_mission():
+	if !rescue_missions_enabled:
+		_rescue_mission_next_time = -1.0
+		return
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+	_rescue_mission_next_time = _now_seconds() + rng.randf_range(
+		max(4.0, rescue_mission_min_delay_seconds),
+		max(rescue_mission_min_delay_seconds, rescue_mission_max_delay_seconds)
+	)
+
+func _get_rescue_mission_candidates() -> Array:
+	var candidates: Array = []
+	var min_player_distance_px = rescue_mission_min_player_distance_meters * PIXELS_PER_METER
+	for friendly in get_tree().get_nodes_in_group("friendly_npc"):
+		if !_is_friendly_alive(friendly):
+			continue
+		if is_instance_valid(player_ref) and friendly.global_position.distance_to(player_ref.global_position) < min_player_distance_px:
+			continue
+		candidates.append(friendly)
+	if !candidates.is_empty():
+		return candidates
+
+	for friendly in get_tree().get_nodes_in_group("friendly_npc"):
+		if _is_friendly_alive(friendly):
+			candidates.append(friendly)
+	return candidates
+
+func resolve_friendly_attack_target(requested_target: CharacterBody2D, enemy: Node2D = null) -> CharacterBody2D:
+	if !_is_friendly_alive(requested_target):
+		return requested_target
+	if !rescue_missions_enabled or game_state != PLAYING:
+		return requested_target
+
+	if _is_friendly_alive(_rescue_mission_target):
+		if enemy and is_instance_valid(enemy) and !_rescue_mission_enemies.has(enemy):
+			_rescue_mission_enemies.append(enemy)
+		return _rescue_mission_target
+
+	_activate_rescue_mission(requested_target, false, enemy)
+	return requested_target
+
+func _is_friendly_alive(friendly: Node) -> bool:
+	if !friendly or !is_instance_valid(friendly) or friendly.is_queued_for_deletion():
+		return false
+	if bool(friendly.get("is_dead")):
+		return false
+	return true
+
+func _update_rescue_mission(delta: float):
+	if !rescue_missions_enabled or game_state != PLAYING:
+		return
+	if _rescue_mission_target and is_instance_valid(_rescue_mission_target):
+		_rescue_mission_timer = max(0.0, _rescue_mission_timer - max(0.0, delta))
+		_prune_rescue_mission_enemies()
+		if !_is_friendly_alive(_rescue_mission_target):
+			_fail_rescue_mission("Too slow. They were overrun.")
+			return
+		if _rescue_mission_timer <= 0.0:
+			_fail_rescue_mission("You lost the trail. They didn't make it.")
+			return
+		if !_rescue_mission_has_active_threat():
+			_complete_rescue_mission()
+		return
+
+	if _rescue_mission_next_time < 0.0:
+		_schedule_next_rescue_mission()
+		return
+
+	if _now_seconds() >= _rescue_mission_next_time:
+		_try_start_rescue_mission()
+
+func _try_start_rescue_mission():
+	if !is_instance_valid(player_ref):
+		_schedule_next_rescue_mission()
+		return
+
+	var candidates = _get_rescue_mission_candidates()
+	if candidates.is_empty():
+		_schedule_next_rescue_mission()
+		return
+
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+	var target := candidates[rng.randi_range(0, candidates.size() - 1)] as CharacterBody2D
+	_activate_rescue_mission(target, true, null)
+
+func _activate_rescue_mission(target: CharacterBody2D, spawn_attackers: bool, initial_enemy: Node2D):
+	if !_is_friendly_alive(target):
+		_schedule_next_rescue_mission()
+		return
+
+	_clear_rescue_mission_state()
+	_rescue_mission_target = target
+	_rescue_mission_timer = max(8.0, rescue_mission_timeout_seconds)
+	_rescue_mission_next_time = -1.0
+	if initial_enemy and is_instance_valid(initial_enemy):
+		_rescue_mission_enemies.append(initial_enemy)
+
+	if !spawn_attackers:
+		_collect_existing_attackers_for_target(target)
+		_show_floating_text("SIDE MISSION: SAVE YOUR FRIEND", Color(1.0, 0.84, 0.42, 1.0))
+		return
+
+	var enemy_scenes = [Opp1Scene, Opp2Scene, Opp3Scene]
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+	var mission_group_id = next_group_id
+	next_group_id += 1
+	var spawn_radius_px = max(48.0, rescue_mission_spawn_radius_meters * PIXELS_PER_METER)
+
+	for i in range(max(1, rescue_mission_enemy_count)):
+		var scene = enemy_scenes[rng.randi_range(0, enemy_scenes.size() - 1)]
+		var enemy = scene.instantiate()
+		enemy.opp_family = _selected_enemy_family
+		enemy.group_id = mission_group_id
+		var angle = rng.randf_range(0.0, TAU)
+		var radius = rng.randf_range(spawn_radius_px * 0.45, spawn_radius_px)
+		enemy.position = target.global_position + Vector2(cos(angle), sin(angle)) * radius
+		$WorldContainer.add_child(enemy)
+		if enemy.has_method("spawn_effect"):
+			enemy.spawn_effect()
+		if enemy.has_method("set_target_body"):
+			enemy.set_target_body(target, true, false)
+		_rescue_mission_enemies.append(enemy)
+
+	_show_floating_text("SIDE MISSION: SAVE YOUR FRIEND", Color(1.0, 0.84, 0.42, 1.0))
+
+func _collect_existing_attackers_for_target(target: CharacterBody2D):
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		if !is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		if enemy.get("target_body") == target and !_rescue_mission_enemies.has(enemy):
+			_rescue_mission_enemies.append(enemy)
+
+func _prune_rescue_mission_enemies():
+	for i in range(_rescue_mission_enemies.size() - 1, -1, -1):
+		var enemy = _rescue_mission_enemies[i]
+		if !is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			_rescue_mission_enemies.remove_at(i)
+
+func _rescue_mission_has_active_threat() -> bool:
+	if !_is_friendly_alive(_rescue_mission_target):
+		return false
+	var clear_radius_px = max(64.0, rescue_mission_clear_radius_meters * PIXELS_PER_METER)
+	for enemy in _rescue_mission_enemies:
+		if !is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		if enemy.get("target_body") == _rescue_mission_target:
+			return true
+		if enemy.global_position.distance_to(_rescue_mission_target.global_position) <= clear_radius_px:
+			return true
+	return false
+
+func _complete_rescue_mission():
+	var reward_text = "FRIEND SAVED"
+	if rescue_mission_success_score > 0:
+		_add_score(rescue_mission_success_score)
+		reward_text += " +" + str(rescue_mission_success_score)
+	_show_floating_text(reward_text, Color(0.72, 1.0, 0.76, 1.0))
+	_clear_rescue_mission_state()
+	_schedule_next_rescue_mission()
+
+func _fail_rescue_mission(message: String):
+	if message != "":
+		_show_floating_text(message, Color(1.0, 0.52, 0.46, 1.0))
+	_clear_rescue_mission_state()
+	_schedule_next_rescue_mission()
+
+func _clear_rescue_mission_state():
+	_rescue_mission_target = null
+	_rescue_mission_enemies.clear()
+	_rescue_mission_timer = 0.0
+
 func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 	if _is_player_currently_hidden_for_stealth():
 		return
@@ -2189,6 +2707,7 @@ func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 				inst.queue_free()
 		
 		var new_opp = scn.instantiate()
+		new_opp.opp_family = _selected_enemy_family
 		new_opp.position = spawn_pos
 		if "group_id" in template:
 			new_opp.group_id = template.group_id
@@ -2201,7 +2720,7 @@ func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 		transform_cooldown = TRANSFORM_COOLDOWN_MAX
 			
 	elif type == "friendly":
-		var templates = [Player2Scene, Player3Scene]
+		var templates = _get_support_player_scenes()
 		var scn = templates[randi() % templates.size()]
 		# Match template if possible
 		if template.has_method("get") and template.get("player_folder"):
@@ -2214,10 +2733,11 @@ func _spawn_transformed_entity(pos: Vector2, type: String, template: Node2D):
 				inst.queue_free()
 				
 		var new_friend = scn.instantiate()
+		new_friend.player_family = _selected_player_family
 		new_friend.position = spawn_pos
 		new_friend.is_controllable = false
 		container.add_child(new_friend)
-		_register_audio_hooks_for_player(new_friend)
+		_register_friendly_character(new_friend)
 		if new_friend.has_method("join_group_behavior"):
 			new_friend.join_group_behavior(template.global_position)
 		if new_friend.has_method("spawn_effect"):
@@ -2265,17 +2785,27 @@ func _spawn_level_one_pickup_layout():
 
 	var rng = RandomNumberGenerator.new()
 	rng.randomize()
+	var enemy_nodes = get_tree().get_nodes_in_group("enemy")
+	var used_coin_positions: Array = []
+	var risky_coin_count = 0
+	if !enemy_nodes.is_empty():
+		risky_coin_count = int(round(float(level1_coin_count) * clamp(level1_coin_enemy_territory_ratio, 0.0, 1.0)))
 
-	# Spawn coins along the path
+	# Push most coins toward enemy-held space so the reward asks for risk.
 	var coin_start_px = level1_coin_spawn_start_meter * PIXELS_PER_METER
 	var coin_end_px = level1_coin_spawn_end_meter * PIXELS_PER_METER
 	for i in range(level1_coin_count):
-		var t = float(i) / max(1.0, float(level1_coin_count - 1))
-		var along_px = lerpf(coin_start_px, coin_end_px, t)
-		var sample = _sample_level_path(along_px)
-		var side = rng.randf_range(-level1_pickup_side_range_meters, level1_pickup_side_range_meters) * PIXELS_PER_METER
-		var pos = sample["position"] + (sample["perp"] as Vector2) * side
+		var pos = null
+		if i < risky_coin_count:
+			pos = _get_enemy_territory_coin_position(enemy_nodes, used_coin_positions, rng)
+		if pos == null:
+			var t = float(i) / max(1.0, float(level1_coin_count - 1))
+			var along_px = lerpf(coin_start_px, coin_end_px, t)
+			var sample = _sample_level_path(along_px)
+			var side = rng.randf_range(-level1_pickup_side_range_meters, level1_pickup_side_range_meters) * PIXELS_PER_METER
+			pos = sample["position"] + (sample["perp"] as Vector2) * side
 		_spawn_coin_pickup(pos)
+		used_coin_positions.append(pos)
 
 	# Spawn apples along the path
 	var apple_start_px = level1_apple_spawn_start_meter * PIXELS_PER_METER
@@ -2287,6 +2817,32 @@ func _spawn_level_one_pickup_layout():
 		var side = rng.randf_range(-level1_pickup_side_range_meters * 0.5, level1_pickup_side_range_meters * 0.5) * PIXELS_PER_METER
 		var pos = sample["position"] + (sample["perp"] as Vector2) * side
 		_spawn_apple_pickup(pos)
+
+func _get_enemy_territory_coin_position(enemy_nodes: Array, existing_positions: Array, rng: RandomNumberGenerator):
+	if enemy_nodes.is_empty():
+		return null
+
+	var cluster_radius_px = max(30.0, level1_coin_enemy_cluster_radius_meters * PIXELS_PER_METER)
+	var min_spacing_px = max(24.0, level1_coin_enemy_min_spacing_meters * PIXELS_PER_METER)
+	for _attempt in range(24):
+		var enemy = enemy_nodes[rng.randi_range(0, enemy_nodes.size() - 1)] as Node2D
+		if !enemy or !is_instance_valid(enemy):
+			continue
+		var angle = rng.randf_range(0.0, TAU)
+		var radius = rng.randf_range(cluster_radius_px * 0.35, cluster_radius_px)
+		var candidate = enemy.global_position + Vector2(cos(angle), sin(angle)) * radius
+		if _is_pos_inside_level_one_path_corridor(candidate):
+			continue
+		if !_is_pickup_position_spaced(candidate, existing_positions, min_spacing_px):
+			continue
+		return candidate
+	return null
+
+func _is_pickup_position_spaced(candidate: Vector2, existing_positions: Array, min_spacing_px: float) -> bool:
+	for pos in existing_positions:
+		if candidate.distance_to(pos) < min_spacing_px:
+			return false
+	return true
 
 func _spawn_coin_pickup(pos: Vector2):
 	if _coin_frames.is_empty():
@@ -2606,6 +3162,65 @@ func _setup_compass():
 	# Connect draw once
 	_compass_arrow.draw.connect(_draw_compass_arrow)
 
+	var rescue_wrapper = Control.new()
+	rescue_wrapper.name = "RescueCompassWrapper"
+	rescue_wrapper.anchor_left = 1.0
+	rescue_wrapper.anchor_right = 1.0
+	rescue_wrapper.anchor_top = 1.0
+	rescue_wrapper.anchor_bottom = 1.0
+	rescue_wrapper.offset_left = -112
+	rescue_wrapper.offset_right = -12
+	rescue_wrapper.offset_top = -112
+	rescue_wrapper.offset_bottom = -8
+	rescue_wrapper.visible = false
+	_compass_layer.add_child(rescue_wrapper)
+
+	_rescue_compass_arrow = Control.new()
+	_rescue_compass_arrow.name = "RescueCompassArrow"
+	_rescue_compass_arrow.position = Vector2(6, 4)
+	_rescue_compass_arrow.size = Vector2(72, 72)
+	_rescue_compass_arrow.pivot_offset = Vector2(36, 36)
+	rescue_wrapper.add_child(_rescue_compass_arrow)
+
+	_rescue_compass_label = Label.new()
+	_rescue_compass_label.name = "RescueCompassLabel"
+	_rescue_compass_label.position = Vector2(-6, 60)
+	_rescue_compass_label.size = Vector2(96, 28)
+	_rescue_compass_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_rescue_compass_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	if _ui_font:
+		_rescue_compass_label.add_theme_font_override("font", _ui_font)
+	_rescue_compass_label.add_theme_font_size_override("font_size", 8)
+	_rescue_compass_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.58, 0.96))
+	_rescue_compass_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.92))
+	_rescue_compass_label.add_theme_constant_override("shadow_outline_size", 4)
+	_rescue_compass_label.text = "SAVE"
+	rescue_wrapper.add_child(_rescue_compass_label)
+
+	_rescue_compass_arrow.draw.connect(_draw_rescue_compass_arrow)
+
+	_rescue_status_label = Label.new()
+	_rescue_status_label.name = "RescueStatusLabel"
+	_rescue_status_label.anchor_left = 0.5
+	_rescue_status_label.anchor_right = 0.5
+	_rescue_status_label.anchor_top = 0.0
+	_rescue_status_label.anchor_bottom = 0.0
+	_rescue_status_label.offset_left = -180
+	_rescue_status_label.offset_right = 180
+	_rescue_status_label.offset_top = 18
+	_rescue_status_label.offset_bottom = 44
+	_rescue_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_rescue_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	if _ui_font:
+		_rescue_status_label.add_theme_font_override("font", _ui_font)
+	_rescue_status_label.add_theme_font_size_override("font_size", 10)
+	_rescue_status_label.add_theme_color_override("font_color", Color(1.0, 0.86, 0.54, 0.96))
+	_rescue_status_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.94))
+	_rescue_status_label.add_theme_constant_override("shadow_outline_size", 5)
+	_rescue_status_label.text = "SIDE MISSION ACTIVE"
+	_rescue_status_label.visible = false
+	_compass_layer.add_child(_rescue_status_label)
+
 var _compass_angle_current: float = 0.0
 
 func _update_compass():
@@ -2613,12 +3228,18 @@ func _update_compass():
 		return
 	if !is_instance_valid(player_ref):
 		if _compass_arrow.get_parent(): _compass_arrow.get_parent().visible = false
+		if _rescue_compass_arrow and _rescue_compass_arrow.get_parent(): _rescue_compass_arrow.get_parent().visible = false
+		if _rescue_status_label: _rescue_status_label.visible = false
 		return
 	if !_level_goal_node or !is_instance_valid(_level_goal_node):
 		if _compass_arrow.get_parent(): _compass_arrow.get_parent().visible = false
+		if _rescue_compass_arrow and _rescue_compass_arrow.get_parent(): _rescue_compass_arrow.get_parent().visible = false
+		if _rescue_status_label: _rescue_status_label.visible = false
 		return
 	if game_state != PLAYING:
 		if _compass_arrow.get_parent(): _compass_arrow.get_parent().visible = false
+		if _rescue_compass_arrow and _rescue_compass_arrow.get_parent(): _rescue_compass_arrow.get_parent().visible = false
+		if _rescue_status_label: _rescue_status_label.visible = false
 		return
 
 	if _compass_arrow.get_parent(): _compass_arrow.get_parent().visible = true
@@ -2638,6 +3259,42 @@ func _update_compass():
 			_compass_label.text = "BUSH  %dm" % int(dist)
 
 	_compass_arrow.queue_redraw()
+	_update_rescue_compass()
+
+func _update_rescue_compass():
+	if !_rescue_compass_arrow or !is_instance_valid(_rescue_compass_arrow):
+		return
+	var wrapper = _rescue_compass_arrow.get_parent()
+	if !wrapper:
+		return
+	if game_state != PLAYING or !_is_friendly_alive(_rescue_mission_target):
+		wrapper.visible = false
+		if _rescue_status_label:
+			_rescue_status_label.visible = false
+		return
+
+	wrapper.visible = true
+	var dir_to_target = _rescue_mission_target.global_position - player_ref.global_position
+	var dist = dir_to_target.length() / PIXELS_PER_METER
+	var target_angle = dir_to_target.angle()
+	var angle_diff = fmod(target_angle - _rescue_compass_angle_current + PI, TAU) - PI
+	_rescue_compass_angle_current += angle_diff * clamp(get_process_delta_time() * 12.0, 0.0, 1.0)
+	var pulse = 0.55 + 0.45 * sin(Time.get_ticks_msec() / 110.0)
+	wrapper.modulate = Color(1.0, 1.0, 1.0, 0.66 + 0.34 * pulse)
+
+	if _rescue_compass_label:
+		if dist > 999.0:
+			_rescue_compass_label.text = "SAVE  FAR"
+		else:
+			_rescue_compass_label.text = "SAVE  %dm" % int(dist)
+		_rescue_compass_label.scale = Vector2.ONE * (0.96 + 0.08 * pulse)
+
+	if _rescue_status_label:
+		_rescue_status_label.visible = true
+		_rescue_status_label.modulate = Color(1.0, 0.88, 0.58, 0.62 + 0.38 * pulse)
+		_rescue_status_label.scale = Vector2.ONE * (0.98 + 0.04 * pulse)
+
+	_rescue_compass_arrow.queue_redraw()
 
 func _draw_compass_arrow():
 	if !_compass_arrow or !is_instance_valid(_compass_arrow):
@@ -2690,6 +3347,37 @@ func _draw_compass_arrow():
 	# Cardinal hint — small "N" label at top for visual grounding
 	var n_pos = center + Vector2(0, -radius - 1)
 	_compass_arrow.draw_circle(n_pos, 2.0, Color(0.8, 0.8, 0.8, 0.2))
+
+func _draw_rescue_compass_arrow():
+	if !_rescue_compass_arrow or !is_instance_valid(_rescue_compass_arrow):
+		return
+	if !is_instance_valid(player_ref) or !_is_friendly_alive(_rescue_mission_target):
+		return
+
+	var center = Vector2(36, 36)
+	var radius = 30.0
+	var angle = _rescue_compass_angle_current
+	var dist_m = player_ref.global_position.distance_to(_rescue_mission_target.global_position) / PIXELS_PER_METER
+	var pulse = 0.62 + 0.38 * sin(Time.get_ticks_msec() / 90.0)
+	var color = Color(1.0, 0.78, 0.34, 0.78 + 0.22 * pulse)
+	if dist_m < 18.0:
+		color = Color(1.0, 0.54, 0.32, pulse)
+
+	_rescue_compass_arrow.draw_circle(center, radius + 4.0, Color(0.09, 0.05, 0.03, 0.72))
+	_rescue_compass_arrow.draw_arc(center, radius + 4.0, 0, TAU, 40, Color(1.0, 0.72, 0.30, 0.30), 2.0)
+	_rescue_compass_arrow.draw_arc(center, radius - 6.0, 0, TAU, 24, Color(1.0, 0.60, 0.24, 0.12), 1.0)
+
+	var tip = center + Vector2(cos(angle), sin(angle)) * radius
+	var back_l = center + Vector2(cos(angle + 2.68), sin(angle + 2.68)) * (radius * 0.44)
+	var back_r = center + Vector2(cos(angle - 2.68), sin(angle - 2.68)) * (radius * 0.44)
+	var notch = center + Vector2(cos(angle + PI), sin(angle + PI)) * (radius * 0.16)
+
+	var arrow_pts = PackedVector2Array([tip, back_l, notch, back_r])
+	var arrow_cols = PackedColorArray([color, color, color, color])
+	_rescue_compass_arrow.draw_polygon(arrow_pts, arrow_cols)
+	_rescue_compass_arrow.draw_polyline(PackedVector2Array([tip, back_l, notch, back_r, tip]), Color(0, 0, 0, 0.38), 1.5)
+	_rescue_compass_arrow.draw_circle(center, 4.0, Color(1.0, 0.97, 0.9, 0.72))
+	_rescue_compass_arrow.draw_circle(center, 2.0, Color(color.r, color.g, color.b, 0.96))
 
 # =====================================================================
 # STATS

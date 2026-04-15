@@ -1,8 +1,10 @@
 extends CharacterBody2D
 
 static var _SPRITE_BUILD_CACHE := {}
+const CharacterCatalog = preload("res://scenes/character_catalog.gd")
 
 @export var player_folder: String = "player_1"
+@export var player_family: String = "warriors"
 @export var default_animation: String = "idle_blinking"
 @export var move_speed: float = 400.0
 @export var is_controllable: bool = false
@@ -13,6 +15,7 @@ static var _SPRITE_BUILD_CACHE := {}
 @export var trail_color_blend_speed: float = 8.0
 @export var trail_visual_enabled: bool = false
 @export var idle_death_timeout_seconds: float = 5.0
+@export var attack_buffer_seconds: float = 0.25
 
 @export_group("Dash")
 @export var dash_speed: float = 1200.0
@@ -30,13 +33,13 @@ signal idle_timer_changed(time_left, max_time)
 signal attack_started(is_controllable_attack)
 signal damage_taken(amount, is_controllable_target)
 signal idle_clock_active_changed(active)
-signal enemy_killed
+signal enemy_killed(enemy)
 signal dash_performed
 
 
 
 const PLAYER_FPS = 20.0
-const PLAYER_SCALE = Vector2(0.15, 0.15)
+const PLAYER_TARGET_DISPLAY_HEIGHT = 140.0
 const ASSIST_ATTACK_RANGE = 60.0
 const PIXELS_PER_METER = 40.0
 
@@ -55,13 +58,19 @@ var _is_dashing: bool = false
 var _dash_timer: float = 0.0
 var _dash_cooldown_timer: float = 0.0
 var _dash_direction: Vector2 = Vector2.ZERO
+var _queued_attack_count: int = 0
+var _attack_buffer_timer: float = 0.0
 
 @onready var _sprite: AnimatedSprite2D = $AnimatedSprite2D
 @onready var _hitbox: Area2D = $Hitbox
 @onready var _collision_shape: CollisionShape2D = $CollisionShape2D
 
 var _current_anim: String = ""
-var _loaded_anims: Array[String] = []
+var _loaded_anims: Array = []
+var _attack_animations: Array = []
+var _resolved_default_animation: String = ""
+var _last_attack_animation: String = ""
+var _attack_chain_timer: float = 0.0
 var _trail_particles: CPUParticles2D = null
 var _trail_highlight_texture: Texture2D = null
 var _trail_gradient_runtime: Gradient = null
@@ -92,6 +101,16 @@ var group_target_pos: Vector2 = Vector2.ZERO
 var is_joining_group: bool = false
 var assist_target: CharacterBody2D = null
 var idle_death_time_left: float = 0.0
+
+func set_player_family(next_family: String):
+	var resolved_family = CharacterCatalog.resolve_player_family(next_family)
+	if resolved_family == "":
+		return
+	if player_family == resolved_family and _sprite and _sprite.sprite_frames:
+		return
+	player_family = resolved_family
+	if is_inside_tree():
+		_build_sprite()
 
 func _ready():
 	_build_sprite()
@@ -184,46 +203,33 @@ func _make_trail_gradient(start_color: Color, mid_color: Color) -> Gradient:
 	return grad
 
 func _build_sprite():
-	var base_path = "res://assets/players/" + player_folder + "/"
-	_loaded_anims.clear()
+	var sprite_data = CharacterCatalog.get_player_sprite_data(player_family, player_folder)
+	if sprite_data.is_empty():
+		return
 
-	var sf: SpriteFrames = null
-	if _SPRITE_BUILD_CACHE.has(player_folder):
-		var cached = _SPRITE_BUILD_CACHE[player_folder]
-		sf = (cached["sprite_frames"] as SpriteFrames).duplicate(true)
-		_loaded_anims = cached["loaded_anims"].duplicate()
-	else:
-		var template_sf = SpriteFrames.new()
-		if template_sf.has_animation("default"): template_sf.remove_animation("default")
-		var built_anims: Array[String] = []
-		
-		for anim_name in ALL_ANIMATIONS:
-			var anim_path = base_path + anim_name + "/"
-			var frames = _load_frames(anim_path)
-			if frames.size() > 0:
-				template_sf.add_animation(anim_name)
-				template_sf.set_animation_loop(anim_name, true)
-				template_sf.set_animation_speed(anim_name, PLAYER_FPS)
-				for tex in frames:
-					template_sf.add_frame(anim_name, tex)
-				built_anims.append(anim_name)
-		
-		_SPRITE_BUILD_CACHE[player_folder] = {
-			"sprite_frames": template_sf,
-			"loaded_anims": built_anims.duplicate()
-		}
-		sf = template_sf.duplicate(true)
-		_loaded_anims = built_anims
-	
-	# _sprite = AnimatedSprite2D.new() # Already in scene
+	player_family = String(sprite_data.get("family_id", player_family))
+	_loaded_anims = (sprite_data.get("loaded_anims", []) as Array).duplicate()
+	_attack_animations = (sprite_data.get("attack_animations", []) as Array).duplicate()
+	_resolved_default_animation = String(sprite_data.get("default_animation", default_animation))
+	_current_anim = ""
+
+	var sf: SpriteFrames = sprite_data.get("sprite_frames", null)
+	if sf == null:
+		return
+
+	var default_anim = _get_default_animation_name()
+	var sample_anim = default_anim
+	if sample_anim == "" and !_loaded_anims.is_empty():
+		sample_anim = String(_loaded_anims[0])
+	var sample_tex = sf.get_frame_texture(sample_anim, 0) if sample_anim != "" and sf.has_animation(sample_anim) else null
+
 	_sprite.sprite_frames = sf
-	_sprite.scale = PLAYER_SCALE
+	_sprite.scale = _get_runtime_sprite_scale(sample_tex)
 	
 	# Offset sprite so its "position" is at its feet
 	if sprite_offset != Vector2.ZERO:
 		_sprite.offset = sprite_offset
 	else:
-		var sample_tex = sf.get_frame_texture(default_animation, 0)
 		if sample_tex:
 			_sprite.offset.y = -sample_tex.get_height() / 2.0
 	
@@ -237,7 +243,8 @@ func _build_sprite():
 		_sprite.animation_finished.connect(_on_anim_finished)
 	
 	# add_child(_sprite) # Already in scene
-	_play_anim(default_animation)
+	if default_anim != "":
+		_play_anim(default_anim)
 
 # func _setup_collision(): ... removed
 
@@ -250,10 +257,17 @@ func _process(delta):
 			_friendly_spawn_highlight_points.clear()
 			queue_redraw()
 	if is_dead: return
+
+	_attack_chain_timer = max(0.0, _attack_chain_timer - delta)
+	if _attack_chain_timer == 0.0:
+		_last_attack_animation = ""
 	
 	# Dash update
 	if is_controllable:
 		_dash_cooldown_timer = max(0.0, _dash_cooldown_timer - delta)
+		_attack_buffer_timer = max(0.0, _attack_buffer_timer - delta)
+		if _attack_buffer_timer == 0.0 and !is_attacking:
+			_queued_attack_count = 0
 		if _is_dashing:
 			_update_dash(delta)
 			return
@@ -272,8 +286,11 @@ func _process(delta):
 	if is_controllable and Input.is_action_just_pressed("dash") and !_is_dashing and _dash_cooldown_timer <= 0.0 and !is_attacking:
 		_perform_dash(move_input)
 		return
-	if is_controllable and Input.is_action_just_pressed("attack") and !is_attacking:
-		attack()
+	if is_controllable and Input.is_action_just_pressed("attack"):
+		if is_attacking:
+			_queue_attack()
+		else:
+			attack()
 	
 	if is_attacking:
 		return # Lock movement
@@ -332,7 +349,9 @@ func _process(delta):
 				if _loaded_anims.has("walking"): _play_anim("walking")
 				return
 
-		_play_anim(default_animation)
+		var idle_anim = _get_default_animation_name()
+		if idle_anim != "":
+			_play_anim(idle_anim)
 		return
 	
 	# Movement
@@ -363,7 +382,9 @@ func _process(delta):
 		if _loaded_anims.has("running"): _play_anim("running")
 		elif _loaded_anims.has("walking"): _play_anim("walking")
 	else:
-		_play_anim(default_animation)
+		var idle_anim = _get_default_animation_name()
+		if idle_anim != "":
+			_play_anim(idle_anim)
 
 func _get_time_seconds() -> float:
 	return Time.get_ticks_msec() / 1000.0
@@ -382,10 +403,13 @@ func _prune_faded_trail_points():
 		trail_points.pop_back()
 		trail_point_spawn_times.pop_back()
 
-func attack():
-	if _play_anim_once("slashing") or _play_anim_once("kicking"):
+func attack(force_chain: bool = false):
+	var attack_anim = _get_next_attack_animation(force_chain)
+	if attack_anim != "" and _play_anim_once(attack_anim):
 		is_attacking = true
 		_hitbox.monitoring = true
+		_last_attack_animation = attack_anim
+		_attack_chain_timer = _get_attack_chain_window(attack_anim)
 		emit_signal("attack_started", is_controllable)
 		_set_idle_clock_audio_active(false)
 		
@@ -401,23 +425,34 @@ func _on_frame_changed():
 		for body in _hitbox.get_overlapping_bodies():
 			if body.is_in_group("enemy") and body.has_method("take_damage"):
 				var prev_hp = body.health
-				body.take_damage(20)
+				body.take_damage(20, self)
 				if prev_hp > 0 and body.health <= 0 and is_controllable:
-					emit_signal("enemy_killed")
-			# Can also hit friendly NPCs if controllable player attacks
-			if is_controllable and body.is_in_group("friendly_npc") and body != self and body.has_method("take_damage"):
-				body.take_damage(20)
+					emit_signal("enemy_killed", body)
 
 func _on_anim_finished():
 	if is_attacking:
 		is_attacking = false
 		_hitbox.monitoring = false
-		_play_anim(default_animation)
+		if _queued_attack_count > 0:
+			_queued_attack_count -= 1
+			if _attack_buffer_timer <= 0.0:
+				_attack_buffer_timer = attack_buffer_seconds
+			attack(true)
+		else:
+			var idle_anim = _get_default_animation_name()
+			if idle_anim != "":
+				_play_anim(idle_anim)
 	
 	if _current_anim == "hurt":
 		is_attacking = false # interrupt attack
+		_queued_attack_count = 0
+		_attack_buffer_timer = 0.0
+		_attack_chain_timer = 0.0
+		_last_attack_animation = ""
 		# return to idle
-		_play_anim(default_animation)
+		var idle_anim = _get_default_animation_name()
+		if idle_anim != "":
+			_play_anim(idle_anim)
 
 func set_input_enabled(enabled: bool):
 	set_process(enabled)
@@ -427,11 +462,17 @@ func set_input_enabled(enabled: bool):
 		emit_signal("idle_timer_changed", idle_death_time_left, idle_death_timeout_seconds)
 		_set_idle_clock_audio_active(false)
 	if !enabled:
+		_queued_attack_count = 0
+		_attack_buffer_timer = 0.0
+		_attack_chain_timer = 0.0
+		_last_attack_animation = ""
 		_set_idle_clock_audio_active(false)
-		_play_anim("idle")
+		var idle_anim = _get_default_animation_name()
+		if idle_anim != "":
+			_play_anim(idle_anim)
 		velocity = Vector2.ZERO
 
-func take_damage(amount):
+func take_damage(amount, _attacker: Node2D = null):
 	if is_dead: return
 	if _is_dashing and dash_invincible: return
 	health -= amount
@@ -447,6 +488,10 @@ func take_damage(amount):
 func die():
 	if is_dead: return
 	is_dead = true
+	_queued_attack_count = 0
+	_attack_buffer_timer = 0.0
+	_attack_chain_timer = 0.0
+	_last_attack_animation = ""
 	_set_idle_clock_audio_active(false)
 	emit_signal("died")
 	_play_anim_once("dying")
@@ -674,10 +719,12 @@ func _perform_dash(input_dir: Vector2):
 	if _collision_shape:
 		_collision_shape.set_deferred("disabled", true)
 	
-	if _loaded_anims.has("sliding"):
-		_play_anim("sliding")
+	if _loaded_anims.has("jump_start"):
+		_play_anim("jump_start")
 	elif _loaded_anims.has("jump_loop"):
 		_play_anim("jump_loop")
+	elif _loaded_anims.has("sliding"):
+		_play_anim("sliding")
 	
 	if _dash_direction.x < 0:
 		_sprite.flip_h = true
@@ -782,6 +829,57 @@ func _play_anim_once(anim: String) -> bool:
 		_current_anim = anim
 		return true
 	return false
+
+func _get_runtime_sprite_scale(sample_tex: Texture2D) -> Vector2:
+	if sample_tex == null:
+		return Vector2.ONE
+	var tex_height = max(1.0, float(sample_tex.get_height()))
+	var uniform_scale = PLAYER_TARGET_DISPLAY_HEIGHT / tex_height
+	return Vector2.ONE * uniform_scale
+
+func _get_default_animation_name() -> String:
+	if _resolved_default_animation != "" and _loaded_anims.has(_resolved_default_animation):
+		return _resolved_default_animation
+	if default_animation != "" and _loaded_anims.has(default_animation):
+		return default_animation
+	if _loaded_anims.has("idle"):
+		return "idle"
+	return "" if _loaded_anims.is_empty() else String(_loaded_anims[0])
+
+func _get_next_attack_animation(force_chain: bool = false) -> String:
+	if _attack_animations.is_empty():
+		if _loaded_anims.has("slashing"):
+			return "slashing"
+		if _loaded_anims.has("kicking"):
+			return "kicking"
+		return ""
+
+	if _attack_animations.size() == 1:
+		return String(_attack_animations[0])
+
+	if (!force_chain and _attack_chain_timer <= 0.0) or _last_attack_animation == "":
+		return String(_attack_animations[0])
+
+	var last_idx = _attack_animations.find(_last_attack_animation)
+	if last_idx == -1:
+		return String(_attack_animations[0])
+
+	return String(_attack_animations[(last_idx + 1) % _attack_animations.size()])
+
+func _queue_attack():
+	var max_queue = max(1, _attack_animations.size() - 1)
+	_queued_attack_count = min(_queued_attack_count + 1, max_queue)
+	_attack_buffer_timer = attack_buffer_seconds
+
+func _get_attack_chain_window(anim_name: String) -> float:
+	return max(attack_buffer_seconds + _get_animation_duration_seconds(anim_name) + 0.12, 0.42)
+
+func _get_animation_duration_seconds(anim_name: String) -> float:
+	if !_sprite or !_sprite.sprite_frames or anim_name == "" or !_sprite.sprite_frames.has_animation(anim_name):
+		return 0.0
+	var fps = max(1.0, _sprite.sprite_frames.get_animation_speed(anim_name))
+	var frame_count = max(1, _sprite.sprite_frames.get_frame_count(anim_name))
+	return float(frame_count) / fps
 
 func _load_frames(dir_path: String) -> Array:
 	var result = []

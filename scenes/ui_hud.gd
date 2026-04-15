@@ -1,6 +1,12 @@
 extends CanvasLayer
+const CharacterCatalog = preload("res://scenes/character_catalog.gd")
 
 signal level_selected(level_id: int)
+signal player_family_selected(family_id: String)
+signal player_member_selected(member_id: String)
+signal enemy_family_selected(family_id: String)
+signal start_requested()
+signal level_select_requested()
 signal retry_pressed()
 signal next_level_pressed()
 signal back_to_levels_pressed()
@@ -34,8 +40,24 @@ var _wanted_level: int = 0
 
 var _active_tween: Tween = null
 var _level_select_screen: Control = null
+var _loadout_screen: Control = null
+var _instructions_screen: Control = null
 var _level_banner_label: Label = null
 var _custom_font: Font = null
+var _selected_player_family: String = CharacterCatalog.PLAYER_DEFAULT_FAMILY
+var _selected_player_member: String = "player_1"
+var _selected_enemy_family: String = CharacterCatalog.ENEMY_DEFAULT_FAMILY
+var _loadout_content_root: PanelContainer = null
+var _loadout_player_hero_texture: TextureRect = null
+var _loadout_player_hero_label: Label = null
+var _start_logo_rect: TextureRect = null
+var _start_title_label: Label = null
+var _start_subtitle_label: Label = null
+var _start_button_stack: VBoxContainer = null
+var _player_family_buttons := {}
+var _enemy_family_buttons := {}
+var _player_member_button_entries: Array = []
+var _preview_animations: Array = []
 
 func _get_custom_font() -> Font:
 	if !_custom_font:
@@ -49,9 +71,261 @@ func _ready():
 	_ensure_score_label()
 	_ensure_combo_label()
 	_ensure_wanted_display()
+	_ensure_intro_menu()
+	_ensure_instructions_screen()
+	_ensure_loadout_screen()
 	if _score_label: _score_label.visible = false
 	if _combo_label: _combo_label.visible = false
 	if _wanted_root: _wanted_root.visible = false
+
+func _ensure_intro_menu():
+	var background = start_screen.get_node_or_null("Background") as TextureRect
+	if background:
+		background.modulate = Color(0.56, 0.66, 0.54, 1.0)
+
+	var legacy_panel = start_screen.get_node_or_null("Panel") as CanvasItem
+	if legacy_panel:
+		legacy_panel.visible = false
+	for node_name in ["Label", "Instructions", "Controls", "Rule"]:
+		var legacy_node = start_screen.get_node_or_null(node_name) as CanvasItem
+		if legacy_node:
+			legacy_node.visible = false
+
+	if start_screen.get_node_or_null("MenuCard"):
+		return
+
+	var menu_card = PanelContainer.new()
+	menu_card.name = "MenuCard"
+	menu_card.anchor_left = 0.5
+	menu_card.anchor_top = 0.5
+	menu_card.anchor_right = 0.5
+	menu_card.anchor_bottom = 0.5
+	menu_card.offset_left = -276.0
+	menu_card.offset_top = -248.0
+	menu_card.offset_right = 276.0
+	menu_card.offset_bottom = 248.0
+
+	var card_style = StyleBoxFlat.new()
+	card_style.bg_color = Color(0.09, 0.12, 0.10, 0.92)
+	card_style.corner_radius_top_left = 24
+	card_style.corner_radius_top_right = 24
+	card_style.corner_radius_bottom_left = 24
+	card_style.corner_radius_bottom_right = 24
+	card_style.border_width_top = 1
+	card_style.border_width_bottom = 1
+	card_style.border_width_left = 1
+	card_style.border_width_right = 1
+	card_style.border_color = Color(0.66, 0.72, 0.58, 0.22)
+	card_style.shadow_color = Color(0, 0, 0, 0.26)
+	card_style.shadow_size = 12
+	card_style.content_margin_left = 30.0
+	card_style.content_margin_right = 30.0
+	card_style.content_margin_top = 26.0
+	card_style.content_margin_bottom = 26.0
+	menu_card.add_theme_stylebox_override("panel", card_style)
+	start_screen.add_child(menu_card)
+
+	var accent = ColorRect.new()
+	accent.name = "Accent"
+	accent.anchor_left = 0.0
+	accent.anchor_top = 0.0
+	accent.anchor_right = 1.0
+	accent.anchor_bottom = 0.0
+	accent.offset_left = 18.0
+	accent.offset_top = 18.0
+	accent.offset_right = -18.0
+	accent.offset_bottom = 24.0
+	accent.color = Color(0.70, 0.76, 0.56, 0.16)
+	menu_card.add_child(accent)
+
+	var root = VBoxContainer.new()
+	root.name = "MenuVBox"
+	root.alignment = BoxContainer.ALIGNMENT_CENTER
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.add_theme_constant_override("separation", 14)
+	menu_card.add_child(root)
+
+	var spacer_top = Control.new()
+	spacer_top.custom_minimum_size = Vector2(0, 12)
+	root.add_child(spacer_top)
+
+	_start_logo_rect = TextureRect.new()
+	_start_logo_rect.name = "LogoMark"
+	_start_logo_rect.custom_minimum_size = Vector2(176, 188)
+	_start_logo_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_start_logo_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_start_logo_rect.texture = load("res://assets/players/creatives/player_2/wizard_idle_6.png")
+	_start_logo_rect.modulate = Color(0.90, 0.96, 0.82, 0.92)
+	root.add_child(_start_logo_rect)
+
+	_start_title_label = Label.new()
+	_start_title_label.name = "TitleLabel"
+	_start_title_label.text = "BUSHBOUND"
+	_start_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_start_title_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var font = _get_custom_font()
+	if font:
+		_start_title_label.add_theme_font_override("font", font)
+	_start_title_label.add_theme_font_size_override("font_size", 30)
+	_start_title_label.add_theme_color_override("font_color", Color(0.94, 0.92, 0.78, 1.0))
+	_start_title_label.add_theme_color_override("font_shadow_color", Color(0.05, 0.08, 0.06, 0.92))
+	_start_title_label.add_theme_constant_override("shadow_outline_size", 8)
+	root.add_child(_start_title_label)
+
+	_start_subtitle_label = Label.new()
+	_start_subtitle_label.name = "SubtitleLabel"
+	_start_subtitle_label.text = "Reach the bush. Protect the baby. Save who you can."
+	_start_subtitle_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_start_subtitle_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_start_subtitle_label.add_theme_font_size_override("font_size", 9)
+	_start_subtitle_label.add_theme_color_override("font_color", Color(0.74, 0.79, 0.70, 0.78))
+	_start_subtitle_label.custom_minimum_size = Vector2(360, 26)
+	_start_subtitle_label.visible = false
+	root.add_child(_start_subtitle_label)
+
+	_start_button_stack = VBoxContainer.new()
+	_start_button_stack.name = "ButtonStack"
+	_start_button_stack.alignment = BoxContainer.ALIGNMENT_CENTER
+	_start_button_stack.add_theme_constant_override("separation", 14)
+	root.add_child(_start_button_stack)
+
+	var play_btn = _create_intro_action_button("PLAY", Color(0.96, 0.98, 0.92, 1.0), Color(0.24, 0.34, 0.22, 0.98))
+	play_btn.pressed.connect(show_loadout_screen)
+	_start_button_stack.add_child(play_btn)
+
+	var instructions_btn = _create_intro_action_button("INSTRUCTIONS", Color(0.90, 0.95, 0.90, 1.0), Color(0.16, 0.20, 0.16, 0.98))
+	instructions_btn.pressed.connect(show_instructions_screen)
+	_start_button_stack.add_child(instructions_btn)
+
+	var footer = Label.new()
+	footer.name = "FooterLabel"
+	footer.text = "SPACE TO PLAY"
+	footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	footer.add_theme_font_size_override("font_size", 8)
+	footer.add_theme_color_override("font_color", Color(0.70, 0.76, 0.66, 0.56))
+	root.add_child(footer)
+
+func _ensure_instructions_screen():
+	if _instructions_screen and is_instance_valid(_instructions_screen):
+		return
+
+	_instructions_screen = Control.new()
+	_instructions_screen.name = "InstructionsScreen"
+	_instructions_screen.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_instructions_screen.visible = false
+	add_child(_instructions_screen)
+
+	var bg = ColorRect.new()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.color = Color(0.06, 0.09, 0.08, 0.96)
+	_instructions_screen.add_child(bg)
+
+	var card = PanelContainer.new()
+	card.anchor_left = 0.5
+	card.anchor_top = 0.5
+	card.anchor_right = 0.5
+	card.anchor_bottom = 0.5
+	card.offset_left = -390.0
+	card.offset_top = -250.0
+	card.offset_right = 390.0
+	card.offset_bottom = 250.0
+	var card_style = StyleBoxFlat.new()
+	card_style.bg_color = Color(0.10, 0.13, 0.11, 0.96)
+	card_style.corner_radius_top_left = 24
+	card_style.corner_radius_top_right = 24
+	card_style.corner_radius_bottom_left = 24
+	card_style.corner_radius_bottom_right = 24
+	card_style.border_width_top = 1
+	card_style.border_width_bottom = 1
+	card_style.border_width_left = 1
+	card_style.border_width_right = 1
+	card_style.border_color = Color(0.72, 0.76, 0.62, 0.22)
+	card_style.content_margin_left = 36.0
+	card_style.content_margin_right = 36.0
+	card_style.content_margin_top = 30.0
+	card_style.content_margin_bottom = 30.0
+	card.add_theme_stylebox_override("panel", card_style)
+	_instructions_screen.add_child(card)
+
+	var root = VBoxContainer.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.alignment = BoxContainer.ALIGNMENT_CENTER
+	root.add_theme_constant_override("separation", 18)
+	card.add_child(root)
+
+	var top_spacer = Control.new()
+	top_spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root.add_child(top_spacer)
+
+	var title = Label.new()
+	title.text = "HOW TO SURVIVE"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var font = _get_custom_font()
+	if font:
+		title.add_theme_font_override("font", font)
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(0.95, 0.93, 0.80, 1.0))
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.90))
+	title.add_theme_constant_override("shadow_outline_size", 6)
+	root.add_child(title)
+
+	var intro = Label.new()
+	intro.text = "Escort the baby to the bush while keeping yourself and your allies alive."
+	intro.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	intro.custom_minimum_size = Vector2(600, 40)
+	intro.add_theme_font_size_override("font_size", 9)
+	intro.add_theme_color_override("font_color", Color(0.74, 0.79, 0.70, 0.82))
+	root.add_child(intro)
+
+	var body = Label.new()
+	body.name = "InstructionsCopy"
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	body.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	body.custom_minimum_size = Vector2(620, 172)
+	body.text = "MOVE: ARROW KEYS\nATTACK: SPACE OR LEFT CLICK\nDASH: SHIFT\nCALL FRIENDS: H\n\nGREEN COMPASS: MAIN BUSH OBJECTIVE\nBLINKING GOLD COMPASS: SIDE MISSION TO SAVE A FRIEND\nBUSHES: HIDE TO SHAKE ENEMIES"
+	body.add_theme_font_size_override("font_size", 10)
+	body.add_theme_color_override("font_color", Color(0.86, 0.89, 0.84, 0.92))
+	body.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.86))
+	body.add_theme_constant_override("shadow_outline_size", 4)
+	root.add_child(body)
+
+	var actions = HBoxContainer.new()
+	actions.alignment = BoxContainer.ALIGNMENT_CENTER
+	actions.add_theme_constant_override("separation", 16)
+	root.add_child(actions)
+
+	var back_btn = _create_intro_action_button("BACK", Color(0.92, 0.96, 0.93, 1.0), Color(0.18, 0.22, 0.18, 0.98))
+	back_btn.pressed.connect(show_start_screen)
+	actions.add_child(back_btn)
+
+	var play_btn = _create_intro_action_button("PLAY", Color(0.98, 1.0, 0.96, 1.0), Color(0.24, 0.34, 0.22, 0.98))
+	play_btn.pressed.connect(show_loadout_screen)
+	actions.add_child(play_btn)
+
+	var bottom_spacer = Control.new()
+	bottom_spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root.add_child(bottom_spacer)
+
+func configure_loadout_selection(player_family: String, enemy_family: String, player_member: String = "player_1"):
+	_selected_player_family = CharacterCatalog.resolve_player_family(player_family)
+	_selected_player_member = _resolve_player_member_for_family(_selected_player_family, player_member)
+	_selected_enemy_family = CharacterCatalog.resolve_enemy_family(enemy_family)
+	_ensure_loadout_screen()
+	_refresh_loadout_screen()
+
+func is_intro_screen_visible() -> bool:
+	return start_screen.visible
+
+func is_instructions_screen_visible() -> bool:
+	return _instructions_screen != null and is_instance_valid(_instructions_screen) and _instructions_screen.visible
+
+func is_loadout_screen_visible() -> bool:
+	return _loadout_screen != null and is_instance_valid(_loadout_screen) and _loadout_screen.visible
+
+func _process(delta: float):
+	_update_preview_animations(delta)
 
 func update_health(current_hp, max_hp):
 	health_bar.max_value = max_hp
@@ -68,6 +342,8 @@ func show_start_screen():
 	# Reset state
 	start_screen.modulate.a = 0
 	start_screen.visible = true
+	if _instructions_screen: _instructions_screen.visible = false
+	if _loadout_screen: _loadout_screen.visible = false
 	game_over_screen.visible = false
 	win_screen.visible = false
 	health_bar.visible = false
@@ -77,15 +353,59 @@ func show_start_screen():
 	if _combo_label: _combo_label.visible = false
 	if _wanted_root: _wanted_root.visible = false
 	if _level_select_screen: _level_select_screen.visible = false
+
+	_configure_start_screen_copy()
 	
 	_fade_in(start_screen)
 	_animate_start_screen()
+
+func show_instructions_screen():
+	if _active_tween: _active_tween.kill()
+	_ensure_instructions_screen()
+	start_screen.visible = false
+	if _loadout_screen: _loadout_screen.visible = false
+	game_over_screen.visible = false
+	win_screen.visible = false
+	health_bar.visible = false
+	damage_bar.visible = false
+	if _proximity_bar_root: _proximity_bar_root.visible = false
+	if _score_label: _score_label.visible = false
+	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
+	if _level_select_screen: _level_select_screen.visible = false
+	if _instructions_screen:
+		_instructions_screen.modulate.a = 0
+		_instructions_screen.visible = true
+		_fade_in(_instructions_screen)
+
+func show_loadout_screen():
+	if _active_tween: _active_tween.kill()
+	_ensure_loadout_screen()
+	_refresh_loadout_screen()
+
+	start_screen.visible = false
+	if _instructions_screen: _instructions_screen.visible = false
+	game_over_screen.visible = false
+	win_screen.visible = false
+	health_bar.visible = false
+	damage_bar.visible = false
+	if _proximity_bar_root: _proximity_bar_root.visible = false
+	if _score_label: _score_label.visible = false
+	if _combo_label: _combo_label.visible = false
+	if _wanted_root: _wanted_root.visible = false
+	if _level_select_screen: _level_select_screen.visible = false
+	if _loadout_screen:
+		_loadout_screen.modulate.a = 0
+		_loadout_screen.visible = true
+		_fade_in(_loadout_screen)
 
 func show_game_over():
 	# Reset state
 	game_over_screen.modulate.a = 0
 	game_over_screen.visible = true
 	start_screen.visible = false
+	if _instructions_screen: _instructions_screen.visible = false
+	if _loadout_screen: _loadout_screen.visible = false
 	win_screen.visible = false
 	health_bar.visible = false
 	damage_bar.visible = false
@@ -109,6 +429,8 @@ func show_hud():
 	if _active_tween: _active_tween.kill()
 	
 	start_screen.visible = false
+	if _instructions_screen: _instructions_screen.visible = false
+	if _loadout_screen: _loadout_screen.visible = false
 	game_over_screen.visible = false
 	win_screen.visible = false
 	health_bar.visible = true
@@ -123,6 +445,8 @@ func show_win():
 	win_screen.modulate.a = 0
 	win_screen.visible = true
 	start_screen.visible = false
+	if _instructions_screen: _instructions_screen.visible = false
+	if _loadout_screen: _loadout_screen.visible = false
 	game_over_screen.visible = false
 	health_bar.visible = false
 	damage_bar.visible = false
@@ -142,6 +466,546 @@ func show_win():
 	_fade_in(win_screen)
 	_animate_win_screen()
 
+func _configure_start_screen_copy():
+	if _start_title_label:
+		_start_title_label.text = "BUSHBOUND"
+	if _start_subtitle_label:
+		_start_subtitle_label.text = "Reach the bush. Protect the baby. Save who you can."
+
+func _ensure_loadout_screen():
+	if _loadout_screen and is_instance_valid(_loadout_screen):
+		return
+
+	_loadout_screen = Control.new()
+	_loadout_screen.name = "LoadoutScreen"
+	_loadout_screen.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loadout_screen.visible = false
+	add_child(_loadout_screen)
+
+	var bg = ColorRect.new()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.color = Color(0.04, 0.06, 0.10, 0.94)
+	_loadout_screen.add_child(bg)
+
+	_loadout_content_root = PanelContainer.new()
+	_loadout_content_root.name = "LoadoutContent"
+	_loadout_content_root.anchor_left = 0.08
+	_loadout_content_root.anchor_right = 0.92
+	_loadout_content_root.anchor_top = 0.05
+	_loadout_content_root.anchor_bottom = 0.95
+	_loadout_content_root.offset_left = 0.0
+	_loadout_content_root.offset_right = 0.0
+	_loadout_content_root.offset_top = 0.0
+	_loadout_content_root.offset_bottom = 0.0
+
+	var panel_style = StyleBoxFlat.new()
+	panel_style.bg_color = Color(0.02, 0.03, 0.05, 0.88)
+	panel_style.corner_radius_top_left = 24
+	panel_style.corner_radius_top_right = 24
+	panel_style.corner_radius_bottom_left = 24
+	panel_style.corner_radius_bottom_right = 24
+	panel_style.border_width_top = 2
+	panel_style.border_width_bottom = 2
+	panel_style.border_width_left = 2
+	panel_style.border_width_right = 2
+	panel_style.border_color = Color(0.78, 0.84, 0.92, 0.22)
+	panel_style.content_margin_left = 28.0
+	panel_style.content_margin_right = 28.0
+	panel_style.content_margin_top = 24.0
+	panel_style.content_margin_bottom = 20.0
+	_loadout_content_root.add_theme_stylebox_override("panel", panel_style)
+	_loadout_screen.add_child(_loadout_content_root)
+
+	var root_vbox = VBoxContainer.new()
+	root_vbox.name = "RootVBox"
+	root_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root_vbox.add_theme_constant_override("separation", 12)
+	_loadout_content_root.add_child(root_vbox)
+
+	var title = Label.new()
+	title.text = "CHOOSE YOUR ROSTERS"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var font = _get_custom_font()
+	if font:
+		title.add_theme_font_override("font", font)
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(0.94, 0.92, 0.80, 1.0))
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
+	title.add_theme_constant_override("shadow_outline_size", 6)
+	root_vbox.add_child(title)
+
+	var subtitle = Label.new()
+	subtitle.text = "Pick one player roster, choose your lead fighter, and choose the enemy roster."
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	subtitle.add_theme_font_size_override("font_size", 10)
+	subtitle.add_theme_color_override("font_color", Color(0.78, 0.84, 0.90, 0.82))
+	root_vbox.add_child(subtitle)
+
+	var body_scroll = ScrollContainer.new()
+	body_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	body_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	root_vbox.add_child(body_scroll)
+
+	var body_vbox = VBoxContainer.new()
+	body_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body_vbox.add_theme_constant_override("separation", 12)
+	body_scroll.add_child(body_vbox)
+
+	var hero_frame = PanelContainer.new()
+	hero_frame.custom_minimum_size = Vector2(0, 154)
+	var hero_style = StyleBoxFlat.new()
+	hero_style.bg_color = Color(0.08, 0.11, 0.10, 0.92)
+	hero_style.corner_radius_top_left = 18
+	hero_style.corner_radius_top_right = 18
+	hero_style.corner_radius_bottom_left = 18
+	hero_style.corner_radius_bottom_right = 18
+	hero_style.border_width_top = 1
+	hero_style.border_width_bottom = 1
+	hero_style.border_width_left = 1
+	hero_style.border_width_right = 1
+	hero_style.border_color = Color(0.76, 0.84, 0.70, 0.22)
+	hero_style.content_margin_top = 10.0
+	hero_style.content_margin_bottom = 10.0
+	hero_style.content_margin_left = 14.0
+	hero_style.content_margin_right = 14.0
+	hero_frame.add_theme_stylebox_override("panel", hero_style)
+	body_vbox.add_child(hero_frame)
+
+	var hero_box = VBoxContainer.new()
+	hero_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	hero_box.add_theme_constant_override("separation", 4)
+	hero_frame.add_child(hero_box)
+
+	_loadout_player_hero_texture = TextureRect.new()
+	_loadout_player_hero_texture.custom_minimum_size = Vector2(112, 108)
+	_loadout_player_hero_texture.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_loadout_player_hero_texture.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_loadout_player_hero_texture.modulate = Color(0.96, 1.0, 0.90, 0.96)
+	hero_box.add_child(_loadout_player_hero_texture)
+
+	_loadout_player_hero_label = Label.new()
+	_loadout_player_hero_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_loadout_player_hero_label.add_theme_font_size_override("font_size", 10)
+	_loadout_player_hero_label.add_theme_color_override("font_color", Color(0.92, 0.96, 0.86, 0.92))
+	hero_box.add_child(_loadout_player_hero_label)
+
+	var columns = HBoxContainer.new()
+	columns.name = "Columns"
+	columns.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	columns.alignment = BoxContainer.ALIGNMENT_CENTER
+	columns.add_theme_constant_override("separation", 20)
+	body_vbox.add_child(columns)
+
+	_build_loadout_column(columns, "PLAYER ROSTER", CharacterCatalog.get_player_family_choices(), true)
+	_build_loadout_column(columns, "ENEMY ROSTER", CharacterCatalog.get_enemy_family_choices(), false)
+
+	var actions = HBoxContainer.new()
+	actions.alignment = BoxContainer.ALIGNMENT_CENTER
+	actions.add_theme_constant_override("separation", 16)
+	root_vbox.add_child(actions)
+
+	var back_btn = _create_loadout_action_button("BACK", Color(0.78, 0.86, 0.96, 1.0), Color(0.14, 0.20, 0.30, 0.96))
+	back_btn.pressed.connect(show_start_screen)
+	actions.add_child(back_btn)
+
+	var levels_btn = _create_loadout_action_button("LEVELS", Color(0.84, 0.90, 1.0, 1.0), Color(0.18, 0.28, 0.52, 0.96))
+	levels_btn.pressed.connect(func(): level_select_requested.emit())
+	actions.add_child(levels_btn)
+
+	var start_btn = _create_loadout_action_button("PLAY", Color(0.96, 1.0, 0.96, 1.0), Color(0.20, 0.52, 0.30, 0.96))
+	start_btn.pressed.connect(func(): start_requested.emit())
+	actions.add_child(start_btn)
+
+func _build_loadout_column(parent: Control, title_text: String, family_choices: Array, is_player: bool):
+	var column = VBoxContainer.new()
+	column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	column.add_theme_constant_override("separation", 10)
+	parent.add_child(column)
+
+	var title = Label.new()
+	title.text = title_text
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 10)
+	title.add_theme_color_override("font_color", Color(0.80, 0.88, 0.96, 0.92))
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.82))
+	title.add_theme_constant_override("shadow_outline_size", 3)
+	column.add_child(title)
+
+	for choice in family_choices:
+		var card = VBoxContainer.new()
+		card.add_theme_constant_override("separation", 8)
+		column.add_child(card)
+
+		var button = Button.new()
+		button.text = String(choice.get("display_name", "")).to_upper()
+		button.custom_minimum_size = Vector2(0, 34)
+		var btn_font = _get_custom_font()
+		if btn_font:
+			button.add_theme_font_override("font", btn_font)
+		button.add_theme_font_size_override("font_size", 10)
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.add_child(button)
+
+		var family_id = String(choice.get("id", ""))
+		if is_player:
+			_player_family_buttons[family_id] = button
+			button.pressed.connect(_on_loadout_player_family_pressed.bind(family_id))
+		else:
+			_enemy_family_buttons[family_id] = button
+			button.pressed.connect(_on_loadout_enemy_family_pressed.bind(family_id))
+
+		var preview_row = HBoxContainer.new()
+		preview_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		preview_row.add_theme_constant_override("separation", 8)
+		card.add_child(preview_row)
+
+		for member in choice.get("members", []):
+			preview_row.add_child(_make_loadout_preview(member, is_player, family_id))
+
+func _make_loadout_preview(member: Dictionary, is_player: bool = false, family_id: String = "") -> Control:
+	var member_id = String(member.get("id", ""))
+	var frame = Button.new()
+	frame.flat = true
+	frame.focus_mode = Control.FOCUS_NONE
+	frame.custom_minimum_size = Vector2(112, 92) if is_player else Vector2(112, 132)
+
+	var style = StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.09, 0.12, 0.92)
+	style.corner_radius_top_left = 10
+	style.corner_radius_top_right = 10
+	style.corner_radius_bottom_left = 10
+	style.corner_radius_bottom_right = 10
+	style.border_width_top = 1
+	style.border_width_bottom = 1
+	style.border_width_left = 1
+	style.border_width_right = 1
+	style.border_color = Color(0.72, 0.78, 0.86, 0.16)
+	style.content_margin_left = 6.0
+	style.content_margin_right = 6.0
+	style.content_margin_top = 6.0
+	style.content_margin_bottom = 6.0
+	frame.add_theme_stylebox_override("normal", style)
+	frame.add_theme_stylebox_override("hover", style.duplicate())
+	frame.add_theme_stylebox_override("pressed", style.duplicate())
+	frame.add_theme_stylebox_override("focus", style.duplicate())
+
+	var vbox = VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 4)
+	frame.add_child(vbox)
+
+	var tex_rect = TextureRect.new()
+	tex_rect.custom_minimum_size = Vector2(54, 44) if is_player else Vector2(94, 92)
+	tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tex_rect.texture = member.get("preview_texture", null)
+	vbox.add_child(tex_rect)
+
+	var preview_frames: SpriteFrames = member.get("preview_sprite_frames", null)
+	var preview_anim = String(member.get("preview_animation", ""))
+	var default_anim = String(member.get("default_animation", ""))
+	var attack_anims: Array = member.get("attack_animations", [])
+	if !is_player and preview_frames and preview_anim != "" and preview_frames.has_animation(preview_anim):
+		var resolved_idle_anim = default_anim
+		if resolved_idle_anim == "" or !preview_frames.has_animation(resolved_idle_anim):
+			resolved_idle_anim = preview_anim
+		_preview_animations.append({
+			"node": tex_rect,
+			"frames": preview_frames,
+			"animation": resolved_idle_anim,
+			"idle_animation": resolved_idle_anim,
+			"attack_animations": attack_anims.duplicate(),
+			"attack_index": 0,
+			"mode": "idle",
+			"frame": 0,
+			"timer": 0.0,
+			"hold_timer": randf_range(1.1, 1.9),
+			"frame_count": preview_frames.get_frame_count(resolved_idle_anim),
+			"fps": max(1.0, preview_frames.get_animation_speed(resolved_idle_anim)) * 0.55,
+			"loop": true
+		})
+
+	var label = Label.new()
+	label.text = String(member.get("label", ""))
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 9 if !is_player else 10)
+	label.add_theme_color_override("font_color", Color(0.84, 0.90, 0.98, 0.82))
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if is_player else TextServer.AUTOWRAP_OFF
+	vbox.add_child(label)
+
+	if is_player:
+		_player_member_button_entries.append({
+			"button": frame,
+			"family_id": family_id,
+			"member_id": member_id
+		})
+		frame.pressed.connect(_on_loadout_player_member_pressed.bind(family_id, member_id))
+	else:
+		frame.pressed.connect(_on_loadout_enemy_family_pressed.bind(family_id))
+
+	return frame
+
+func _on_loadout_player_family_pressed(family_id: String):
+	_selected_player_family = family_id
+	_selected_player_member = _resolve_player_member_for_family(family_id, _selected_player_member)
+	player_family_selected.emit(family_id)
+	player_member_selected.emit(_selected_player_member)
+	_refresh_loadout_screen()
+
+func _on_loadout_enemy_family_pressed(family_id: String):
+	_selected_enemy_family = family_id
+	enemy_family_selected.emit(family_id)
+	_refresh_loadout_screen()
+
+func _on_loadout_player_member_pressed(family_id: String, member_id: String):
+	_selected_player_family = family_id
+	_selected_player_member = _resolve_player_member_for_family(family_id, member_id)
+	player_family_selected.emit(family_id)
+	player_member_selected.emit(_selected_player_member)
+	_refresh_loadout_screen()
+
+func _refresh_loadout_screen():
+	if !_loadout_screen or !is_instance_valid(_loadout_screen):
+		return
+
+	for family_id in _player_family_buttons.keys():
+		_style_loadout_button(_player_family_buttons[family_id], String(family_id) == _selected_player_family, true)
+	for family_id in _enemy_family_buttons.keys():
+		_style_loadout_button(_enemy_family_buttons[family_id], String(family_id) == _selected_enemy_family, false)
+	for entry in _player_member_button_entries:
+		var button = entry.get("button", null) as Button
+		var family_id = String(entry.get("family_id", ""))
+		var member_id = String(entry.get("member_id", ""))
+		_style_loadout_member_button(button, family_id == _selected_player_family and member_id == _selected_player_member, family_id == _selected_player_family)
+	_refresh_loadout_player_hero_preview()
+
+func _refresh_loadout_player_hero_preview():
+	if !_loadout_player_hero_texture or !_loadout_player_hero_label:
+		return
+	var sprite_data = CharacterCatalog.get_player_sprite_data(_selected_player_family, _selected_player_member)
+	_loadout_player_hero_texture.texture = sprite_data.get("preview_texture", null)
+	_loadout_player_hero_label.text = "LEAD: %s" % _format_member_label(_selected_player_member)
+
+func _style_loadout_button(button: Button, selected: bool, is_player: bool):
+	if !button:
+		return
+
+	var fg = Color(0.94, 0.96, 0.98, 1.0) if selected else Color(0.72, 0.78, 0.86, 0.92)
+	var accent = Color(0.24, 0.56, 0.34, 1.0) if is_player else Color(0.58, 0.26, 0.20, 1.0)
+	var bg = accent if selected else Color(0.09, 0.11, 0.15, 0.96)
+	var border = Color(accent.r, accent.g, accent.b, 0.85) if selected else Color(0.68, 0.74, 0.82, 0.18)
+
+	var style_normal = StyleBoxFlat.new()
+	style_normal.bg_color = bg
+	style_normal.corner_radius_top_left = 8
+	style_normal.corner_radius_top_right = 8
+	style_normal.corner_radius_bottom_left = 8
+	style_normal.corner_radius_bottom_right = 8
+	style_normal.border_width_top = 1
+	style_normal.border_width_bottom = 1
+	style_normal.border_width_left = 1
+	style_normal.border_width_right = 1
+	style_normal.border_color = border
+
+	var style_hover = style_normal.duplicate()
+	style_hover.bg_color = Color(min(bg.r + 0.06, 1.0), min(bg.g + 0.06, 1.0), min(bg.b + 0.06, 1.0), bg.a)
+
+	var style_pressed = style_normal.duplicate()
+	style_pressed.bg_color = Color(min(bg.r + 0.12, 1.0), min(bg.g + 0.12, 1.0), min(bg.b + 0.12, 1.0), bg.a)
+
+	button.add_theme_stylebox_override("normal", style_normal)
+	button.add_theme_stylebox_override("hover", style_hover)
+	button.add_theme_stylebox_override("pressed", style_pressed)
+	button.add_theme_color_override("font_color", fg)
+	button.add_theme_color_override("font_hover_color", Color.WHITE)
+
+func _style_loadout_member_button(button: Button, selected: bool, family_selected: bool):
+	if !button:
+		return
+
+	var base_bg = Color(0.07, 0.09, 0.12, 0.92)
+	var border = Color(0.72, 0.78, 0.86, 0.16)
+	var glow = Color(0.82, 0.90, 0.98, 0.10)
+	if family_selected:
+		border = Color(0.54, 0.74, 0.60, 0.36)
+		glow = Color(0.24, 0.36, 0.26, 0.38)
+	if selected:
+		base_bg = Color(0.16, 0.22, 0.16, 0.98)
+		border = Color(0.88, 0.96, 0.72, 0.90)
+		glow = Color(0.30, 0.42, 0.28, 0.78)
+
+	var style_normal = StyleBoxFlat.new()
+	style_normal.bg_color = base_bg
+	style_normal.corner_radius_top_left = 10
+	style_normal.corner_radius_top_right = 10
+	style_normal.corner_radius_bottom_left = 10
+	style_normal.corner_radius_bottom_right = 10
+	style_normal.border_width_top = 1
+	style_normal.border_width_bottom = 1
+	style_normal.border_width_left = 1
+	style_normal.border_width_right = 1
+	style_normal.border_color = border
+	style_normal.shadow_color = Color(0, 0, 0, 0.24)
+	style_normal.shadow_size = 8
+	style_normal.content_margin_left = 6.0
+	style_normal.content_margin_right = 6.0
+	style_normal.content_margin_top = 6.0
+	style_normal.content_margin_bottom = 6.0
+	style_normal.expand_margin_top = 2.0 if selected else 0.0
+	style_normal.expand_margin_bottom = 2.0 if selected else 0.0
+	style_normal.expand_margin_left = 2.0 if selected else 0.0
+	style_normal.expand_margin_right = 2.0 if selected else 0.0
+
+	var style_hover = style_normal.duplicate()
+	style_hover.bg_color = base_bg.lerp(Color.WHITE, 0.06)
+
+	var style_pressed = style_normal.duplicate()
+	style_pressed.bg_color = glow
+
+	button.add_theme_stylebox_override("normal", style_normal)
+	button.add_theme_stylebox_override("hover", style_hover)
+	button.add_theme_stylebox_override("pressed", style_pressed)
+	button.add_theme_stylebox_override("focus", style_hover)
+
+func _resolve_player_member_for_family(family_id: String, requested_member: String) -> String:
+	for choice in CharacterCatalog.get_player_family_choices():
+		if String(choice.get("id", "")) != family_id:
+			continue
+		var members: Array = choice.get("members", [])
+		for member in members:
+			if String(member.get("id", "")) == requested_member:
+				return requested_member
+		if !members.is_empty():
+			return String((members[0] as Dictionary).get("id", "player_1"))
+	return "player_1"
+
+func _format_member_label(member_id: String) -> String:
+	return member_id.replace("_", " ").capitalize()
+
+func _create_intro_action_button(text: String, text_color: Color, bg_color: Color) -> Button:
+	var btn = _create_loadout_action_button(text, text_color, bg_color)
+	btn.custom_minimum_size = Vector2(220, 52)
+	btn.add_theme_font_size_override("font_size", 12)
+	return btn
+
+func _create_loadout_action_button(text: String, text_color: Color, bg_color: Color) -> Button:
+	var btn = Button.new()
+	btn.text = text
+	btn.custom_minimum_size = Vector2(150, 40)
+	var btn_font = _get_custom_font()
+	if btn_font:
+		btn.add_theme_font_override("font", btn_font)
+	btn.add_theme_font_size_override("font_size", 10)
+
+	var style_normal = StyleBoxFlat.new()
+	style_normal.bg_color = bg_color
+	style_normal.corner_radius_top_left = 8
+	style_normal.corner_radius_top_right = 8
+	style_normal.corner_radius_bottom_left = 8
+	style_normal.corner_radius_bottom_right = 8
+	style_normal.border_width_top = 1
+	style_normal.border_width_bottom = 1
+	style_normal.border_width_left = 1
+	style_normal.border_width_right = 1
+	style_normal.border_color = Color(text_color.r, text_color.g, text_color.b, 0.46)
+
+	var style_hover = style_normal.duplicate()
+	style_hover.bg_color = Color(min(bg_color.r + 0.08, 1.0), min(bg_color.g + 0.08, 1.0), min(bg_color.b + 0.08, 1.0), bg_color.a)
+
+	var style_pressed = style_normal.duplicate()
+	style_pressed.bg_color = Color(min(bg_color.r + 0.14, 1.0), min(bg_color.g + 0.14, 1.0), min(bg_color.b + 0.14, 1.0), bg_color.a)
+
+	btn.add_theme_stylebox_override("normal", style_normal)
+	btn.add_theme_stylebox_override("hover", style_hover)
+	btn.add_theme_stylebox_override("pressed", style_pressed)
+	btn.add_theme_color_override("font_color", text_color)
+	btn.add_theme_color_override("font_hover_color", Color.WHITE)
+	return btn
+
+func _update_preview_animations(delta: float):
+	if _preview_animations.is_empty():
+		return
+
+	for preview in _preview_animations:
+		var node: TextureRect = preview.get("node", null)
+		var frames: SpriteFrames = preview.get("frames", null)
+		var anim_name = String(preview.get("animation", ""))
+		if node == null or frames == null or anim_name == "" or !is_instance_valid(node):
+			continue
+		if !node.is_visible_in_tree():
+			continue
+
+		var next_hold = float(preview.get("hold_timer", 0.0)) - delta
+		preview["hold_timer"] = next_hold
+		if String(preview.get("mode", "idle")) == "idle" and next_hold <= 0.0:
+			_advance_preview_animation_state(preview)
+			anim_name = String(preview.get("animation", anim_name))
+
+		var frame_count = int(preview.get("frame_count", 0))
+		if frame_count <= 0:
+			continue
+
+		var fps = float(preview.get("fps", 8.0))
+		var frame_time = 1.0 / max(1.0, fps)
+		var next_timer = float(preview.get("timer", 0.0)) + delta
+		var next_frame = int(preview.get("frame", 0))
+		var loop = bool(preview.get("loop", true))
+		var finished = false
+		while next_timer >= frame_time:
+			next_timer -= frame_time
+			next_frame += 1
+			if next_frame >= frame_count:
+				if loop:
+					next_frame = 0
+				else:
+					next_frame = frame_count - 1
+					finished = true
+					break
+
+		preview["timer"] = next_timer
+		preview["frame"] = next_frame
+		node.texture = frames.get_frame_texture(anim_name, next_frame)
+
+		if finished:
+			_advance_preview_animation_state(preview)
+
+func _advance_preview_animation_state(preview: Dictionary):
+	var frames: SpriteFrames = preview.get("frames", null)
+	if frames == null:
+		return
+
+	var idle_anim = String(preview.get("idle_animation", ""))
+	var attack_anims: Array = preview.get("attack_animations", [])
+	var mode = String(preview.get("mode", "idle"))
+
+	if mode == "idle" and !attack_anims.is_empty():
+		var attack_index = int(preview.get("attack_index", 0))
+		var next_attack = String(attack_anims[attack_index % attack_anims.size()])
+		if frames.has_animation(next_attack):
+			preview["animation"] = next_attack
+			preview["mode"] = "attack"
+			preview["attack_index"] = attack_index + 1
+			preview["frame"] = 0
+			preview["timer"] = 0.0
+			preview["hold_timer"] = 0.0
+			preview["frame_count"] = frames.get_frame_count(next_attack)
+			preview["fps"] = max(1.0, frames.get_animation_speed(next_attack)) * 0.58
+			preview["loop"] = false
+			return
+
+	if idle_anim != "" and frames.has_animation(idle_anim):
+		preview["animation"] = idle_anim
+		preview["mode"] = "idle"
+		preview["frame"] = 0
+		preview["timer"] = 0.0
+		preview["hold_timer"] = randf_range(1.25, 2.1)
+		preview["frame_count"] = frames.get_frame_count(idle_anim)
+		preview["fps"] = max(1.0, frames.get_animation_speed(idle_anim)) * 0.52
+		preview["loop"] = true
+
 # =====================================================================
 # LEVEL SELECT SCREEN
 # =====================================================================
@@ -151,6 +1015,8 @@ func show_level_select(max_unlocked: int, total_levels: int = 10):
 
 	# Hide everything else
 	start_screen.visible = false
+	if _instructions_screen: _instructions_screen.visible = false
+	if _loadout_screen: _loadout_screen.visible = false
 	game_over_screen.visible = false
 	win_screen.visible = false
 	health_bar.visible = false
@@ -516,17 +1382,19 @@ func _fade_in(node: Control):
 
 func _animate_start_screen():
 	if _active_tween: _active_tween.kill()
-	_active_tween = create_tween().set_loops()
-	
-	var label = start_screen.get_node("Label")
-	var instructions = start_screen.get_node("Instructions")
-	
-	# Title Floating
-	_active_tween.tween_property(label, "position:y", label.position.y - 10, 2.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	_active_tween.parallel().tween_property(instructions, "modulate:a", 0.3, 1.0)
-	
-	_active_tween.tween_property(label, "position:y", label.position.y, 2.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	_active_tween.parallel().tween_property(instructions, "modulate:a", 1.0, 1.0)
+	var label = _start_title_label
+	var logo = _start_logo_rect
+	if !label:
+		return
+	label.position.y = 0.0
+	label.scale = Vector2.ONE
+	if _start_button_stack:
+		_start_button_stack.modulate.a = 1.0
+	if logo:
+		logo.scale = Vector2.ONE
+		_active_tween = create_tween().set_loops()
+		_active_tween.tween_property(logo, "scale", Vector2(1.02, 1.02), 2.8).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		_active_tween.tween_property(logo, "scale", Vector2(1.0, 1.0), 2.8).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 func _animate_game_over_screen():
 	if _active_tween: _active_tween.kill()
