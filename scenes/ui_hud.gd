@@ -670,7 +670,7 @@ func _make_loadout_preview(member: Dictionary, is_player: bool = false, family_i
 	var frame = Button.new()
 	frame.flat = true
 	frame.focus_mode = Control.FOCUS_NONE
-	frame.custom_minimum_size = Vector2(112, 92) if is_player else Vector2(112, 132)
+	frame.custom_minimum_size = Vector2(132, 122) if is_player else Vector2(112, 132)
 
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0.07, 0.09, 0.12, 0.92)
@@ -694,11 +694,11 @@ func _make_loadout_preview(member: Dictionary, is_player: bool = false, family_i
 
 	var vbox = VBoxContainer.new()
 	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
-	vbox.add_theme_constant_override("separation", 4)
+	vbox.add_theme_constant_override("separation", 6 if is_player else 4)
 	frame.add_child(vbox)
 
 	var tex_rect = TextureRect.new()
-	tex_rect.custom_minimum_size = Vector2(54, 44) if is_player else Vector2(94, 92)
+	tex_rect.custom_minimum_size = Vector2(84, 78) if is_player else Vector2(94, 92)
 	tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	tex_rect.texture = member.get("preview_texture", null)
@@ -731,7 +731,7 @@ func _make_loadout_preview(member: Dictionary, is_player: bool = false, family_i
 	var label = Label.new()
 	label.text = String(member.get("label", ""))
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.add_theme_font_size_override("font_size", 9 if !is_player else 10)
+	label.add_theme_font_size_override("font_size", 9 if !is_player else 11)
 	label.add_theme_color_override("font_color", Color(0.84, 0.90, 0.98, 0.82))
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if is_player else TextServer.AUTOWRAP_OFF
 	vbox.add_child(label)

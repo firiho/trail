@@ -1292,7 +1292,10 @@ func _get_level_background_source_id() -> int:
 			return -1
 
 func _load_resized_tile_texture(path: String) -> Texture2D:
-	var image = Image.load_from_file(path)
+	var source_texture = load(path) as Texture2D
+	if source_texture == null:
+		return null
+	var image = source_texture.get_image()
 	if image == null or image.is_empty():
 		return null
 	image.resize(TILE_PX, TILE_PX, Image.INTERPOLATE_LANCZOS)
