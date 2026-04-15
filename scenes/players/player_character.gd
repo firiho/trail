@@ -281,6 +281,9 @@ func _process(delta):
 	if is_controllable:
 		move_input = _get_move_input_vector()
 		_update_idle_death_timer(delta, move_input.length() > 0.0)
+		if move_input.length() > 0.0 and is_attacking and _queued_attack_count > 0:
+			_queued_attack_count = 0
+			_attack_buffer_timer = 0.0
 		if is_dead:
 			return
 	if is_controllable and Input.is_action_just_pressed("dash") and !_is_dashing and _dash_cooldown_timer <= 0.0 and !is_attacking:
@@ -434,9 +437,8 @@ func _on_anim_finished():
 		is_attacking = false
 		_hitbox.monitoring = false
 		if _queued_attack_count > 0:
-			_queued_attack_count -= 1
-			if _attack_buffer_timer <= 0.0:
-				_attack_buffer_timer = attack_buffer_seconds
+			_queued_attack_count = 0
+			_attack_buffer_timer = 0.0
 			attack(true)
 		else:
 			var idle_anim = _get_default_animation_name()
@@ -867,8 +869,7 @@ func _get_next_attack_animation(force_chain: bool = false) -> String:
 	return String(_attack_animations[(last_idx + 1) % _attack_animations.size()])
 
 func _queue_attack():
-	var max_queue = max(1, _attack_animations.size() - 1)
-	_queued_attack_count = min(_queued_attack_count + 1, max_queue)
+	_queued_attack_count = 1
 	_attack_buffer_timer = attack_buffer_seconds
 
 func _get_attack_chain_window(anim_name: String) -> float:
